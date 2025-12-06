@@ -151,6 +151,7 @@ using namespace chrono::copter;
 %shared_ptr(chrono::viper::ViperDriver)
 %shared_ptr(chrono::viper::ViperDCMotorControl)
 %shared_ptr(chrono::viper::ViperSpeedDriver)
+%shared_ptr(chrono::viper::ViperWaypointFollower)
 
 %shared_ptr(chrono::curiosity::CuriosityPart)
 %shared_ptr(chrono::curiosity::CuriosityChassis)

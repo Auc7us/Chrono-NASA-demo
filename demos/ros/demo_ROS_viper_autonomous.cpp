@@ -18,6 +18,11 @@
 
 #include "chrono_models/robot/viper/Viper.h"
 
+#include <cmath>
+#include <cstdint>
+#include <fstream>
+#include <stdexcept>
+
 #include "chrono/physics/ChSystemNSC.h"
 #include "chrono/physics/ChBodyEasy.h"
 #include "chrono/utils/ChUtilsInputOutput.h"
@@ -42,6 +47,7 @@
 #include "chrono_ros/handlers/robot/viper/ChROSViperDCMotorControlHandler.h"
 #include "chrono_ros/handlers/robot/viper/ChROSViperSpeedDriverHandler.h"
 #include "chrono_ros/handlers/robot/viper/ChROSViperWaypointFollowerHandler.h"
+#include "chrono_ros/handlers/robot/viper/ChROSViperWaypointPathHandler.h"
 #include "chrono_ros/handlers/sensor/ChROSCameraHandler.h"
 // #include "chrono_thirdparty/filesystem/path.h"
 
@@ -96,6 +102,35 @@ class MySoilParams : public vehicle::SCMTerrain::SoilParametersCallback {
 
 // Use custom material for the Viper Wheel
 bool use_custom_mat = false;
+
+void InitializeApolloTerrain(vehicle::SCMTerrain& terrain, double mesh_resolution) {
+    const std::string bmp_file = GetChronoDataFile("robot/viper/terrain/nasa_apollo_site.bmp");
+
+    // Uniform scaling: enforce 50 m terrain length (BMP x-axis span).
+    constexpr double kDesiredTerrainLength = 50.0;
+    constexpr double kHeightMin = -2.5;
+    constexpr double kHeightMax = 2.5;
+
+    std::ifstream bmp_stream(bmp_file, std::ios::binary);
+    if (!bmp_stream.is_open()) {
+        throw std::runtime_error("Failed to open BMP file: " + bmp_file);
+    }
+
+    bmp_stream.seekg(18);
+    int32_t bmp_width = 0;
+    int32_t bmp_height = 0;
+    bmp_stream.read(reinterpret_cast<char*>(&bmp_width), sizeof(bmp_width));
+    bmp_stream.read(reinterpret_cast<char*>(&bmp_height), sizeof(bmp_height));
+    if (bmp_width <= 0 || bmp_height == 0) {
+        throw std::runtime_error("Invalid BMP dimensions in file: " + bmp_file);
+    }
+
+    const double meters_per_pixel = kDesiredTerrainLength / static_cast<double>(bmp_width);
+    const double terrain_length = kDesiredTerrainLength;
+    const double terrain_width = std::abs(static_cast<double>(bmp_height)) * meters_per_pixel;
+
+    terrain.Initialize(bmp_file, terrain_length, terrain_width, kHeightMin, kHeightMax, mesh_resolution);
+}
 
 std::shared_ptr<ChContactMaterial> CustomWheelMaterial(ChContactMethod contact_method) {
     float mu = 0.4f;   // coefficient of friction
@@ -162,20 +197,6 @@ int main(int argc, char* argv[]) {
     auto clock_handler = chrono_types::make_shared<ChROSClockHandler>();
     ros_manager->RegisterHandler(clock_handler);    
 
-    // // Create terrain
-    // vehicle::SCMTerrain terrain(&sys);
-    // terrain.SetPlane(ChCoordsys<>(ChVector3d(0, 0, -0.5)));
-    // terrain.Initialize(15, 15, mesh_resolution);
-    // terrain.SetSoilParameters(0.2e6, 0, 1.1, 0, 30, 0.01, 4e7, 3e4);
-
-    // Create Viper Rover
-
-    // double ramp_time = 1.0;  // Time for speed ramp-up
-    // double initial_speed = 0.0;
-    // auto driver = chrono_types::make_shared<ViperSpeedDriver>(ramp_time, initial_speed);
-
-    // auto driver = chrono_types::make_shared<ViperDCMotorControl>();
-
     double initial_target_x = -5.0;
     double initial_target_y =  0.0;
     double initial_target_z =  0.0;
@@ -199,17 +220,17 @@ int main(int argc, char* argv[]) {
 
     // Create a subscriber to receive ROS motor commands
     auto driver_inputs_rate = 25;
-    
-    // auto driver_inputs_topic_name = "~/input/driver_inputs";
-    // auto driver_inputs_handler = chrono_types::make_shared<ChROSViperDCMotorControlHandler>(driver_inputs_rate, driver, driver_inputs_topic_name);
-    
-    // auto driver_inputs_topic_name = "~/input/driver_speed_control";
-    // auto driver_inputs_handler = chrono_types::make_shared<ChROSViperSpeedDriverHandler>(driver_inputs_rate, driver, driver_inputs_topic_name);
 
     auto driver_inputs_topic_name = "~/input/driver_waypoint_update";
     auto driver_inputs_handler = chrono_types::make_shared<ChROSViperWaypointFollowerHandler>(driver_inputs_rate, driver, driver_inputs_topic_name);
     
     ros_manager->RegisterHandler(driver_inputs_handler);
+
+    auto path_topic_name = "~/output/rover/waypoint_path";
+    auto path_publish_rate = 10;
+    auto waypoint_path_handler =
+        chrono_types::make_shared<ChROSViperWaypointPathHandler>(path_publish_rate, driver, path_topic_name);
+    ros_manager->RegisterHandler(waypoint_path_handler);
 
     // Create a publisher for the rover state
     auto rover_state_rate = 25;
@@ -306,16 +327,9 @@ int main(int argc, char* argv[]) {
     // Note that SCMTerrain uses a default ISO reference frame (Z up). Since the mechanism is modeled here in
     // a Y-up global frame, we rotate the terrain plane by -90 degrees about the X axis.
     // Note: Irrlicht uses a Y-up frame
-    terrain.SetPlane(ChCoordsys<>(ChVector3d(0, 0, 0)));
+    terrain.SetPlane(ChCoordsys<>(ChVector3d(17, 0, -3)));
 
-    auto apollo_mesh = ChTriangleMeshConnected::CreateFromWavefrontFile(
-        GetChronoDataFile("robot/viper/terrain/nasa_apollo_site.obj"),
-        false,  // don't recompute normals
-        true    // load UVs etc.
-    );
-
-    // Initialize SCM terrain from the triangle mesh (pass the mesh object, not the shared_ptr)
-    terrain.Initialize(*apollo_mesh, mesh_resolution);
+    InitializeApolloTerrain(terrain, mesh_resolution);
 
     auto lunar_material = chrono_types::make_shared<ChVisualMaterial>();
     lunar_material->SetAmbientColor({0.0, 0.0, 0.0}); //0.65f,0.65f,0.65f
@@ -447,43 +461,6 @@ int main(int argc, char* argv[]) {
     auto offset_pose = ChFrame<>(ChVector3d(1.5, 0, 0.4), QuatFromAngleZ(0));
     auto offset_pose_stereo_L = ChFrame<>(ChVector3d(1.5,  0.2, 0.4), QuatFromAngleZ(0)); // y +ve is left 
     auto offset_pose_stereo_R = ChFrame<>(ChVector3d(1.5, -0.2, 0.4), QuatFromAngleZ(0));
-
-    // auto lidar = chrono_types::make_shared<ChLidarSensor>(viper.GetChassis()->GetBody(),  // body lidar is attached to
-    //                                                       50,                             // scanning rate in Hz
-    //                                                       offset_pose,                    // offset pose
-    //                                                       480,                  // number of horizontal samples
-    //                                                       300,                  // number of vertical channels
-    //                                                       (float)(2 * CH_PI),   // horizontal field of view
-    //                                                       (float)CH_PI / 12, (float)-CH_PI / 3,
-    //                                                       140.0f);              // vertical field of view
-    // lidar->SetName("Lidar Sensor 1");
-    // lidar->SetLag(0.f);
-    // lidar->SetCollectionWindow(0.02f);
-
-    // lidar->PushFilter(chrono_types::make_shared<ChFilterDIAccess>()); // Provides the host access to the Depth,Intensity data
-    // lidar->PushFilter(chrono_types::make_shared<ChFilterVisualize>(960, 480, "Raw Lidar Depth Data"));
-    // lidar->PushFilter(chrono_types::make_shared<ChFilterPCfromDepth>()); // Convert Depth,Intensity data to XYZI point
-    // lidar->PushFilter(chrono_types::make_shared<ChFilterVisualizePointCloud>(960, 600, 0.25, "Lidar Point Cloud"));
-    // lidar->PushFilter(chrono_types::make_shared<ChFilterXYZIAccess>());
-    // manager->AddSensor(lidar);
-
-
-    // // Radar Sensor
-    // auto radar = chrono_types::make_shared<ChRadarSensor>(viper.GetChassis()->GetBody(),
-    //                                                       50,
-    //                                                       offset_pose,
-    //                                                       240,
-    //                                                       120,
-    //                                                       (float)(CH_PI / 1.5),
-    //                                                       (float)(CH_PI / 5),
-    //                                                       100.f);
-    // radar->SetName("Radar Sensor");
-    // radar->SetLag(0.f);
-    // radar->SetCollectionWindow(0.02f);
-
-    // radar->PushFilter(chrono_types::make_shared<ChFilterRadarXYZReturn>("Front Radar"));    
-    // radar->PushFilter(chrono_types::make_shared<ChFilterRadarXYZVisualize>(960, 480, 0.2, "Radar View"));
-    // manager->AddSensor(radar);
 
     // Camera Sensor
     int camera_update_rate = 50;

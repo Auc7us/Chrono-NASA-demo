@@ -42,7 +42,7 @@ foreach(_ros2_packages_path IN LISTS _ament_prefix_path)
 endforeach()
 
 # Find ROS packages
-set(_required_ros_packages rclcpp rcl_interfaces std_msgs geometry_msgs sensor_msgs tf2_ros tf2_msgs)
+set(_required_ros_packages rclcpp rcl_interfaces std_msgs geometry_msgs sensor_msgs tf2_ros tf2_msgs nav_msgs)
 set(_optional_ros_packages chrono_ros_interfaces)
 
 foreach(_package IN LISTS _required_ros_packages)
@@ -157,6 +157,8 @@ if (CH_ROS_HAS_INTERFACES)
     handlers/robot/viper/ChROSViperDCMotorControlHandler.cpp
     handlers/robot/viper/ChROSViperWaypointFollowerHandler.h
     handlers/robot/viper/ChROSViperWaypointFollowerHandler.cpp
+    handlers/robot/viper/ChROSViperWaypointPathHandler.h
+    handlers/robot/viper/ChROSViperWaypointPathHandler.cpp
   )
 endif()
 source_group("robot_handler" FILES ${CH_ROS_ROBOT_HANDLER_FILES})

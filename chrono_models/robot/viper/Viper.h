@@ -23,6 +23,7 @@
 
 #include <string>
 #include <array>
+#include <vector>
 // #include <execinfo.h>
 // #include <cstdlib>
 #include "chrono/assets/ChColor.h"
@@ -454,24 +455,55 @@ class CH_MODELS_API ViperWaypointFollower : public ViperDriver {
     ViperWaypointFollower(double init_target_x, double init_target_y, double init_target_z); 
     ~ViperWaypointFollower() {}
 
-    void SetTarget(double x, double y, double z) {
-      std::cout << "New Target = (" << x << ", " << y << ", " << z << ")" << "Current Pos: "<< viper->GetChassis()->GetBody()->GetPos() << std::endl;
-      std::cout << "Current velocity: " << viper->GetChassis()->GetBody()->GetPosDt() << std::endl;
-      std::cout <<" "<< std::endl;
-      m_target_x = x;
-      m_target_y = y;
-      m_target_z = z;
-    }
+    void SetTarget(double x, double y, double z);
+    std::vector<ChVector3d> GetPathPoints() const;
+    size_t GetCurrentPathIndex() const { return m_path_index; }
 
   private:
     virtual DriveMotorType GetDriveMotorType() const override { return DriveMotorType::SPEED; }
     virtual void Update(double time) override;
 
+    void BuildCurvatureLimitedSpline(const ChVector3d& start_pos,
+                                     double start_yaw,
+                                     const ChVector3d& goal_pos);
+    void EnsureCurvatureLimit(std::vector<ChVector3d>& samples);
+    ChVector3d EvaluateBezierPoint(const std::array<ChVector3d, 4>& control_pts, double t) const;
+    double ExtractYaw(const ChQuaternion<>& q) const;
+    size_t FindClosestPathIndex(const ChVector3d& position) const;
+    size_t SelectLookaheadIndex(size_t closest_idx, double lookahead_distance) const;
+    double ComputePurePursuitCurvature(const ChVector3d& lookahead_point,
+                                       const ChVector3d& rover_pos,
+                                       double rover_yaw,
+                                       double lookahead_distance,
+                                       bool& reverse_mode) const;
+    double MapCurvatureToSteering(double curvature,
+                                  double wheelbase,
+                                  double track_width,
+                                  double steer_limit,
+                                  std::array<double, 4>& out_angles,
+                                  std::array<double, 4>& out_radii,
+                                  double& center_angle) const;
+    double ComputeSpeedCommand(double center_angle,
+                               double steer_limit,
+                               double distance_to_goal,
+                               double base_speed,
+                               bool reverse_mode) const;
     double m_target_x;  
     double m_target_y;  
     double m_target_z;
     double m_angular_velocity = 0.0;
     std::array<double, 4> turn_radius;
+    std::vector<ChVector3d> m_path_points;
+    size_t m_path_index = 0;
+    double m_waypoint_threshold;
+    double m_curvature_limit_rad;
+    double m_lookahead_distance;
+    double m_reverse_heading_threshold;
+    double m_nominal_speed_ratio;
+    double m_goal_slowdown_radius;
+    double m_reverse_speed_ratio;
+    double m_min_speed_ratio;
+    bool m_reverse_mode;
 };
 
 /// @} robot_models_viper
@@ -480,5 +512,4 @@ class CH_MODELS_API ViperWaypointFollower : public ViperDriver {
 }  // namespace chrono
 
 #endif
-
 
