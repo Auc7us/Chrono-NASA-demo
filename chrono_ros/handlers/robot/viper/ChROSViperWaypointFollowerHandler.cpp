@@ -18,48 +18,56 @@
 // =============================================================================
 
 #include "chrono_ros/handlers/robot/viper/ChROSViperWaypointFollowerHandler.h"
-#include "chrono_ros/handlers/ChROSHandlerUtilities.h"
 
-using std::placeholders::_1;
+#include "chrono_ros/handlers/ChROSHandlerUtilities.h"
+#include "chrono_ros/ipc/ChROSIPCMessage.h"
+
+#include <iostream>
+
 using namespace chrono::viper;
 
 namespace chrono {
 namespace ros {
 
 ChROSViperWaypointFollowerHandler::ChROSViperWaypointFollowerHandler(double update_rate,
-                                                                 std::shared_ptr<ViperWaypointFollower> driver,
-                                                                 const std::string& topic_name)
-    : ChROSHandler(update_rate), m_driver(driver), m_topic_name(topic_name) {
-
-        // ChVector3d start_pos = driver->GetVehicle()->GetChassisPos();
-        m_target_x = -5;
-        m_target_y = 0;
-        m_target_z = 0;
-    }
+                                                                     std::shared_ptr<ViperWaypointFollower> driver,
+                                                                     const std::string& topic_name)
+    : ChROSHandler(update_rate),
+      m_driver(driver),
+      m_topic_name(topic_name),
+      m_target{-5.0, 0.0, 0.0},
+      m_subscriber_setup_sent(false) {}
 
 bool ChROSViperWaypointFollowerHandler::Initialize(std::shared_ptr<ChROSInterface> interface) {
-    auto node = interface->GetNode();
-
     if (!ChROSHandlerUtilities::CheckROSTopicName(interface, m_topic_name)) {
         return false;
     }
-
-    m_subscription = node->create_subscription<geometry_msgs::msg::Vector3>(
-        m_topic_name, 10, std::bind(&ChROSViperWaypointFollowerHandler::Callback, this, _1));
-
     return true;
 }
 
-void ChROSViperWaypointFollowerHandler::Callback(const geometry_msgs::msg::Vector3& msg) {
-    std::lock_guard<std::mutex> lock(m_mutex);
-    m_target_x = msg.x;
-    m_target_y = msg.y;
-    m_target_z = msg.z;
+std::vector<uint8_t> ChROSViperWaypointFollowerHandler::GetSerializedData(double time) {
+    if (!m_subscriber_setup_sent) {
+        m_subscriber_setup_sent = true;
+        std::vector<uint8_t> data(m_topic_name.begin(), m_topic_name.end());
+        return data;
+    }
+    return {};
 }
 
-void ChROSViperWaypointFollowerHandler::Tick(double time) {
+void ChROSViperWaypointFollowerHandler::HandleIncomingMessage(const ipc::Message& msg) {
+    if (msg.header.payload_size != sizeof(ipc::ViperWaypointTarget)) {
+        std::cerr << "ViperWaypointFollowerHandler: Received payload size mismatch" << std::endl;
+        return;
+    }
+
+    const auto* data = msg.GetPayload<ipc::ViperWaypointTarget>();
+    ApplyTarget(*data);
+}
+
+void ChROSViperWaypointFollowerHandler::ApplyTarget(const ipc::ViperWaypointTarget& target) {
     std::lock_guard<std::mutex> lock(m_mutex);
-    m_driver->SetTarget(m_target_x, m_target_y, m_target_z);
+    m_target = target;
+    m_driver->SetTarget(m_target.x, m_target.y, m_target.z);
 }
 
 }  // namespace ros

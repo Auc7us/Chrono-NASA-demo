@@ -22,17 +22,17 @@
 
 #include "chrono/ChConfig.h"
 #include "chrono/physics/ChSystemSMC.h"
-#include "chrono/physics/ChBody.h"
-#include "chrono/physics/ChInertiaUtils.h"
+#include "chrono/physics/ChMassProperties.h"
 #include "chrono/physics/ChLinkMotorRotationAngle.h"
+#include "chrono/assets/ChVisualSystem.h"
 #include "chrono/utils/ChUtilsGeometry.h"
-#include "chrono/utils/ChUtilsInputOutput.h"
-#include "chrono/core/ChTimer.h"
+#include "chrono/input_output/ChWriterCSV.h"
+#include "chrono/utils/ChUtilsCreators.h"
 
-#include "chrono_fsi/ChSystemFsi.h"
+#include "chrono_fsi/sph/ChFsiSystemSPH.h"
 
-#ifdef CHRONO_OPENGL
-    #include "chrono_fsi/visualization/ChFsiVisualizationGL.h"
+#ifdef CHRONO_VSG
+    #include "chrono_fsi/sph/visualization/ChSphVisualizationVSG.h"
 #endif
 
 #include "chrono_thirdparty/filesystem/path.h"
@@ -40,17 +40,23 @@
 // Chrono namespaces
 using namespace chrono;
 using namespace chrono::fsi;
+using namespace chrono::fsi::sph;
+
+using std::cout;
+using std::cerr;
+using std::endl;
+
+// -----------------------------------------------------------------------------
 
 // Physical properties of terrain particles
-double iniSpacing = 0.01;
-double kernelLength = 0.01;
+double initSpacing = 0.01;
+double kernelMultiplier = 1;
 double density = 1700.0;
 
 // Dimension of the terrain container
-double smalldis = 1.0e-9;
-double bxDim = 5.0 + smalldis;
-double byDim = 0.8 + smalldis;
-double bzDim = 0.12 + smalldis;
+double bxDim = 5.0;
+double byDim = 0.8;
+double bzDim = 0.12;
 
 // Size of the wheel
 double wheel_radius = 0.47;
@@ -60,7 +66,7 @@ double total_mass = 105.22;
 std::string wheel_obj = "vehicle/hmmwv/hmmwv_tire_coarse_closed.obj";
 
 // Initial Position of wheel
-ChVector3d wheel_IniPos(-bxDim / 2 + wheel_radius, 0.0, wheel_radius + bzDim + iniSpacing);
+ChVector3d wheel_IniPos(-bxDim / 2 + wheel_radius, 0.0, wheel_radius + bzDim + initSpacing);
 ChVector3d wheel_IniVel(0.0, 0.0, 0.0);
 
 // Simulation time and stepsize
@@ -69,16 +75,15 @@ double dT = 2.5e-4;
 
 // linear actuator and angular actuator
 auto actuator = chrono_types::make_shared<ChLinkLockLinActuator>();
-auto motor = chrono_types::make_shared<ChLinkMotorRotationAngle>();
 
 // Save data as csv files to see the results off-line using Paraview
 bool output = true;
-int out_fps = 20;
+double output_fps = 20;
 
 // Output directories and settings
 const std::string out_dir = GetChronoOutputPath() + "FSI_Single_Wheel_Test/";
 
-// Enable/disable run-time visualization (if Chrono::OpenGL is available)
+// Enable/disable run-time visualization
 bool render = true;
 float render_fps = 100;
 
@@ -118,7 +123,10 @@ void WriteWheelVTK(const std::string& filename, ChTriangleMeshConnected& mesh, c
 // Create the objects of the MBD system. Rigid bodies, and if FSI,
 // their BCE representation are created and added to the systems
 //------------------------------------------------------------------
-void CreateSolidPhase(ChSystemSMC& sysMBS, ChSystemFsi& sysFSI) {
+void CreateSolidPhase(ChFsiSystemSPH& sysFSI) {
+    ChFsiFluidSystemSPH& sysSPH = sysFSI.GetFluidSystemSPH();
+    ChSystem& sysMBS = sysFSI.GetMultibodySystem();
+
     // Common contact material
     auto cmaterial = chrono_types::make_shared<ChContactMaterialSMC>();
     cmaterial->SetYoungModulus(1e8);
@@ -139,17 +147,13 @@ void CreateSolidPhase(ChSystemSMC& sysMBS, ChSystemFsi& sysFSI) {
     ground->EnableCollision(true);
 
     // Add BCE particles attached on the walls into FSI system
-    sysFSI.AddBoxContainerBCE(ground,                                     //
-                              ChFrame<>(ChVector3d(0, 0, bzDim), QUNIT),  //
-                              ChVector3d(bxDim, byDim, 2 * bzDim),        //
-                              ChVector3i(2, 0, -1));
+    auto ground_bce = sysSPH.CreatePointsBoxContainer(ChVector3d(bxDim, byDim, 2 * bzDim), {2, 0, -1});
+    sysFSI.AddFsiBoundary(ground_bce, ChFrame<>(ChVector3d(0, 0, bzDim), QUNIT));
 
     // Create the wheel -- always SECOND body in the system
     auto trimesh = chrono_types::make_shared<ChTriangleMeshConnected>();
-    double scale_ratio = 1.0;
     trimesh->LoadWavefrontMesh(GetChronoDataFile(wheel_obj), false, true);
-    trimesh->Transform(ChVector3d(0, 0, 0), ChMatrix33<>(scale_ratio));  // scale to a different size
-    trimesh->RepairDuplicateVertexes(1e-9);                              // if meshes are not watertight
+    trimesh->RepairDuplicateVertexes(1e-9);  // if meshes are not watertight
 
     // Compute mass inertia from mesh
     double mmass;
@@ -162,37 +166,40 @@ void CreateSolidPhase(ChSystemSMC& sysMBS, ChSystemFsi& sysFSI) {
     ChInertiaUtils::PrincipalInertia(minertia, principal_I, principal_inertia_rot);
     mcog = ChVector3d(0.0, 0.0, 0.0);
 
-    // Set the abs orientation, position and velocity
+    // Create wheel body
     auto wheel = chrono_types::make_shared<ChBodyAuxRef>();
-    ChQuaternion<> wheel_Rot = QUNIT;
+    sysMBS.AddBody(wheel);
+    wheel->SetName("wheel");
+    wheel->SetFixed(false);
+    wheel->EnableCollision(false);
 
     // Set the COG coordinates to barycenter, without displacing the REF reference.
     // Make the COG frame a principal frame.
-    wheel->SetFrameCOMToRef(ChFrame<>(mcog, principal_inertia_rot));
+    ////wheel->SetFrameCOMToRef(ChFrame<>(mcog, principal_inertia_rot));
 
     // Set inertia
     wheel->SetMass(total_mass * 1.0 / 2.0);
     wheel->SetInertiaXX(mdensity * principal_I);
-    wheel->SetPosDt(wheel_IniVel);
-    wheel->SetAngVelLocal(ChVector3d(0.0, 0.0, 0.0));  // set an initial anular velocity (rad/s)
+    wheel->SetFrameRefToAbs(ChFrame<>(ChVector3d(wheel_IniPos), QUNIT));  // set absolute position
+    wheel->SetPosDt(wheel_IniVel);                                        // set initial velocity
+    wheel->SetAngVelLocal(ChVector3d(0.0, 0.0, 0.0));                     // set initial anular velocity
 
-    // Set the absolute position of the body:
-    wheel->SetFrameRefToAbs(ChFrame<>(ChVector3d(wheel_IniPos), ChQuaternion<>(wheel_Rot)));
-    sysMBS.AddBody(wheel);
+    auto wheel_coll_shape =
+        chrono_types::make_shared<ChCollisionShapeTriangleMesh>(cmaterial, trimesh, false, false, 0.005);
+    auto wheel_vis_shape = chrono_types::make_shared<ChVisualShapeTriangleMesh>();
+    wheel_vis_shape->SetMesh(trimesh);
+    wheel_vis_shape->SetColor(ChColor(0.4f, 0.4f, 0.4f));
 
-    wheel->SetFixed(false);
-    auto wheel_shape = chrono_types::make_shared<ChCollisionShapeTriangleMesh>(cmaterial, trimesh, false, false, 0.005);
-    wheel->AddCollisionShape(wheel_shape);
-    wheel->EnableCollision(false);
+    wheel->AddCollisionShape(wheel_coll_shape);
+    wheel->AddVisualShape(wheel_vis_shape);
 
     // Add this body to the FSI system
-    std::vector<ChVector3d> BCE_wheel;
-    sysFSI.CreateMeshPoints(*trimesh, iniSpacing, BCE_wheel);
-    sysFSI.AddPointsBCE(wheel, BCE_wheel, ChFrame<>(), true);
-    sysFSI.AddFsiBody(wheel);
+    auto BCE_wheel = sysSPH.CreatePointsMesh(*trimesh);
+    sysFSI.AddFsiBody(wheel, BCE_wheel, ChFrame<>(), false);
 
     // Create the chassis -- always THIRD body in the system
     auto chassis = chrono_types::make_shared<ChBody>();
+    chassis->SetName("chassis");
     chassis->SetMass(total_mass * 1.0 / 2.0);
     chassis->SetPos(wheel->GetPos());
     chassis->EnableCollision(false);
@@ -200,17 +207,20 @@ void CreateSolidPhase(ChSystemSMC& sysMBS, ChSystemFsi& sysFSI) {
 
     // Add geometry of the chassis.
     chrono::utils::AddBoxGeometry(chassis.get(), cmaterial, ChVector3d(0.2, 0.2, 0.2), ChVector3d(0, 0, 0));
+    chassis->GetVisualShape(0)->SetColor(ChColor(0.6f, 0.8f, 0.6f));
     sysMBS.AddBody(chassis);
 
     // Create the axle -- always FOURTH body in the system
     auto axle = chrono_types::make_shared<ChBody>();
+    axle->SetName("axle");
     axle->SetMass(total_mass * 1.0 / 2.0);
     axle->SetPos(wheel->GetPos());
     axle->EnableCollision(false);
     axle->SetFixed(false);
 
     // Add geometry of the axle.
-    chrono::utils::AddSphereGeometry(axle.get(), cmaterial, 0.5, ChVector3d(0, 0, 0));
+    chrono::utils::AddCylinderGeometry(axle.get(), cmaterial, 0.025, 0.3, VNULL, Q_ROTATE_Z_TO_Y);
+    axle->GetVisualShape(0)->SetColor(ChColor(0.8f, 0.8f, 0.2f));
     sysMBS.AddBody(axle);
 
     // Connect the chassis to the containing bin (ground) through a translational joint and create a linear actuator.
@@ -235,7 +245,8 @@ void CreateSolidPhase(ChSystemSMC& sysMBS, ChSystemFsi& sysFSI) {
     prismatic2->SetName("prismatic_axle_chassis");
     sysMBS.AddLink(prismatic2);
 
-    // Connect the wheel to the axle through a engine joint.
+    // Connect the wheel to the axle through a motor.
+    auto motor = chrono_types::make_shared<ChLinkMotorRotationAngle>();
     motor->SetName("engine_wheel_axle");
     motor->Initialize(wheel, axle, ChFrame<>(wheel->GetPos(), chrono::QuatFromAngleX(-CH_PI_2)));
     motor->SetAngleFunction(chrono_types::make_shared<ChFunctionRamp>(0, wheel_AngVel));
@@ -247,93 +258,92 @@ void CreateSolidPhase(ChSystemSMC& sysMBS, ChSystemFsi& sysFSI) {
 int main(int argc, char* argv[]) {
     // Create oputput directories
     if (!filesystem::create_directory(filesystem::path(out_dir))) {
-        std::cerr << "Error creating directory " << out_dir << std::endl;
+        cerr << "Error creating directory " << out_dir << std::endl;
         return 1;
     }
     if (!filesystem::create_directory(filesystem::path(out_dir + "/particles"))) {
-        std::cerr << "Error creating directory " << out_dir + "/particles" << std::endl;
+        cerr << "Error creating directory " << out_dir + "/particles" << std::endl;
         return 1;
     }
     if (!filesystem::create_directory(filesystem::path(out_dir + "/fsi"))) {
-        std::cerr << "Error creating directory " << out_dir + "/fsi" << std::endl;
+        cerr << "Error creating directory " << out_dir + "/fsi" << std::endl;
         return 1;
     }
     if (!filesystem::create_directory(filesystem::path(out_dir + "/vtk"))) {
-        std::cerr << "Error creating directory " << out_dir + "/vtk" << std::endl;
+        cerr << "Error creating directory " << out_dir + "/vtk" << std::endl;
         return 1;
     }
 
     // Create the MBS and FSI systems
     ChSystemSMC sysMBS;
-    ChSystemFsi sysFSI(&sysMBS);
+    ChFsiFluidSystemSPH sysSPH;
+    ChFsiSystemSPH sysFSI(&sysMBS, &sysSPH);
 
     sysMBS.SetCollisionSystemType(ChCollisionSystem::Type::BULLET);
 
     ChVector3d gravity = ChVector3d(0, 0, -9.81);
     sysMBS.SetGravitationalAcceleration(gravity);
-    sysFSI.SetGravitationalAcceleration(gravity);
+    sysSPH.SetGravitationalAcceleration(gravity);
 
-    sysFSI.SetVerbose(verbose_fsi);
+    sysSPH.SetVerbose(verbose_fsi);
+    sysFSI.SetStepSizeCFD(dT);
+    sysFSI.SetStepsizeMBD(dT);
 
     // Use the default input file or you may enter your input parameters as a command line argument
-    std::string inputJson = GetChronoDataFile("fsi/input_json/demo_FSI_SingleWheelTest.json");
-    if (argc == 3) {
-        inputJson = std::string(argv[1]);
-        wheel_slip = std::stod(argv[2]);
+    if (argc == 2) {
+        wheel_slip = std::stod(argv[1]);
     } else if (argc != 1) {
-        std::cout << "usage: ./demo_FSI_SingleWheelTest <json_file> <wheel_slip>" << std::endl;
-        std::cout << "or to use default input parameters ./demo_FSI_SingleWheelTest " << std::endl;
+        cout << "usage: ./demo_FSI_SingleWheelTest <wheel_slip>" << endl;
+        cout << "or to use default input parameters ./demo_FSI_SingleWheelTest " << endl;
         return 1;
     }
 
-    sysFSI.ReadParametersFromFile(inputJson);
+    ChFsiFluidSystemSPH::ElasticMaterialProperties mat_props;
+    mat_props.density = density;
+    mat_props.Young_modulus = 1e6;
+    mat_props.Poisson_ratio = 0.3;
+    mat_props.mu_I0 = 0.03;
+    mat_props.mu_fric_s = 0.7;
+    mat_props.mu_fric_2 = 0.7;
+    mat_props.average_diam = 0.005;
+    mat_props.cohesion_coeff = 1e2;
+    sysSPH.SetElasticSPH(mat_props);
 
-    // Set the initial particle spacing
-    sysFSI.SetInitialSpacing(iniSpacing);
-
-    // Set the SPH kernel length
-    sysFSI.SetKernelLength(kernelLength);
-
-    // Set the terrain density
-    sysFSI.SetDensity(density);
-
-    // Set the simulation stepsize
-    sysFSI.SetStepSize(dT);
+    ChFsiFluidSystemSPH::SPHParameters sph_params;
+    sph_params.integration_scheme = IntegrationScheme::RK2;
+    sph_params.initial_spacing = initSpacing;
+    sph_params.d0_multiplier = kernelMultiplier;
+    sph_params.shifting_method = ShiftingMethod::PPST_XSPH;
+    sph_params.shifting_xsph_eps = 0.25;
+    sph_params.shifting_ppst_pull = 1.0;
+    sph_params.shifting_ppst_push = 3.0;
+    sph_params.boundary_method = BoundaryMethod::ADAMI;
+    sph_params.viscosity_method = ViscosityMethod::ARTIFICIAL_BILATERAL;
+    sph_params.kernel_type = KernelType::CUBIC_SPLINE;
+    sph_params.num_proximity_search_steps = 1;
+    sph_params.artificial_viscosity = 0.5;
+    sph_params.use_variable_time_step = false;
+    sysSPH.SetSPHParameters(sph_params);
 
     // Set the terrain container size
-    sysFSI.SetContainerDim(ChVector3d(bxDim, byDim, bzDim));
+    sysSPH.SetContainerDim(ChVector3d(bxDim, byDim, bzDim));
 
-    // Set SPH discretization type, consistent or inconsistent
-    sysFSI.SetDiscreType(false, false);
-
-    // Set wall boundary condition
-    sysFSI.SetWallBC(BceVersion::ADAMI);
-
-    // Set rigid body boundary condition
-    sysFSI.SetRigidBodyBC(BceVersion::ADAMI);
-
-    // Set cohsion of the granular material
-    sysFSI.SetCohesionForce(1.0e2);
-
-    // Setup the SPH method
-    sysFSI.SetSPHMethod(FluidDynamics::WCSPH);
-
-    // Set up the periodic boundary condition (if not, set relative larger values)
-    ChVector3d cMin(-bxDim / 2 * 10, -byDim / 2 - 0.5 * iniSpacing, -bzDim * 10);
-    ChVector3d cMax(bxDim / 2 * 10, byDim / 2 + 0.5 * iniSpacing, bzDim * 10);
-    sysFSI.SetBoundaries(cMin, cMax);
+    // Set up the periodic boundary condition in Y direction
+    ChVector3d cMin(-10 * bxDim / 2, -byDim / 2 - initSpacing / 2, -bzDim * 10);
+    ChVector3d cMax(+10 * bxDim / 2, +byDim / 2 + initSpacing / 2, +bzDim * 10);
+    sysSPH.SetComputationalDomain(ChAABB(cMin, cMax), BC_Y_PERIODIC);
 
     // Initialize the SPH particles
-    auto initSpace0 = sysFSI.GetInitialSpacing();
+    auto initSpace0 = sysSPH.GetInitialSpacing();
     ChVector3d boxCenter(0.0, 0.0, bzDim / 2);
     ChVector3d boxHalfDim(bxDim / 2 - initSpace0, byDim / 2, bzDim / 2 - initSpace0);
-    sysFSI.AddBoxSPH(boxCenter, boxHalfDim);
+    sysSPH.AddBoxSPH(boxCenter, boxHalfDim);
 
     // Create Solid region and attach BCE SPH particles
-    CreateSolidPhase(sysMBS, sysFSI);
+    CreateSolidPhase(sysFSI);
 
-    // Set simulation data output length
-    sysFSI.SetOutputLength(0);
+    // Set simulation data output level
+    sysSPH.SetOutputLevel(OutputLevel::STATE);
 
     // Construction of the FSI system must be finalized before running
     sysFSI.Initialize();
@@ -354,23 +364,44 @@ int main(int argc, char* argv[]) {
     }
 
     // Create a run-tme visualizer
-#ifdef CHRONO_OPENGL
-    ChFsiVisualizationGL fsi_vis(&sysFSI);
+    std::shared_ptr<ChVisualSystem> vis;
+
+#ifdef CHRONO_VSG
     if (render) {
-        fsi_vis.SetTitle("Chrono::FSI single wheel demo");
-        fsi_vis.AddCamera(ChVector3d(0, -5 * byDim, 5 * bzDim), ChVector3d(0, 0, 0));
-        fsi_vis.SetCameraMoveScale(0.05f);
-        fsi_vis.EnableBoundaryMarkers(true);
-        fsi_vis.Initialize();
+        // FSI plugin
+        auto visFSI = chrono_types::make_shared<ChSphVisualizationVSG>(&sysFSI);
+        visFSI->EnableFluidMarkers(true);
+        visFSI->EnableBoundaryMarkers(true);
+        visFSI->EnableRigidBodyMarkers(true);
+
+        // VSG visual system (attach visFSI as plugin)
+        auto visVSG = chrono_types::make_shared<vsg3d::ChVisualSystemVSG>();
+        visVSG->AttachPlugin(visFSI);
+        visVSG->AttachSystem(&sysMBS);
+        visVSG->SetWindowTitle("Single Wheel Test");
+        visVSG->SetWindowSize(1280, 800);
+        visVSG->SetWindowPosition(100, 100);
+        visVSG->AddCamera(ChVector3d(0.5 * bxDim, -5 * byDim, 5 * bzDim), ChVector3d(0, 0, 0));
+        visVSG->SetLightIntensity(0.9f);
+        visVSG->SetLightDirection(-CH_PI_2, CH_PI / 6);
+
+        visVSG->Initialize();
+        vis = visVSG;
     }
+#else
+    render = false;
 #endif
 
     // Start the simulation
-    unsigned int output_steps = (unsigned int)round(1 / (out_fps * dT));
-    unsigned int render_steps = (unsigned int)round(1 / (render_fps * dT));
-
     double time = 0.0;
-    int current_step = 0;
+    int sim_frame = 0;
+    int out_frame = 0;
+    int render_frame = 0;
+
+    double timer_CFD = 0;
+    double timer_MBD = 0;
+    double timer_FSI = 0;
+    double timer_step = 0;
 
     ChTimer timer;
     timer.start();
@@ -384,12 +415,12 @@ int main(int argc, char* argv[]) {
         const auto& angvel = wheel->GetAngVelLocal();
 
         if (verbose) {
-            std::cout << "time: " << time << std::endl;
-            std::cout << "  wheel position:         " << w_pos << std::endl;
-            std::cout << "  wheel linear velocity:  " << w_vel << std::endl;
-            std::cout << "  wheel angular velocity: " << angvel << std::endl;
-            std::cout << "  drawbar pull:           " << force << std::endl;
-            std::cout << "  wheel torque:           " << torque << std::endl;
+            cout << "time: " << time << endl;
+            cout << "  wheel position:         " << w_pos << endl;
+            cout << "  wheel linear velocity:  " << w_vel << endl;
+            cout << "  wheel angular velocity: " << angvel << endl;
+            cout << "  drawbar pull:           " << force << endl;
+            cout << "  wheel torque:           " << torque << endl;
         }
 
         if (output) {
@@ -400,30 +431,46 @@ int main(int argc, char* argv[]) {
             myDBP_Torque << time << "\t" << force.x() << "\t" << torque.z() << "\n";
         }
 
-        if (output && current_step % output_steps == 0) {
-            std::cout << "-------- Output" << std::endl;
-            sysFSI.PrintParticleToFile(out_dir + "/particles");
-            sysFSI.PrintFsiInfoToFile(out_dir + "/fsi", time);
+        if (output && time >= out_frame / output_fps) {
+            cout << "-------- Output" << endl;
+            sysSPH.SaveParticleData(out_dir + "/particles");
+            sysSPH.SaveSolidData(out_dir + "/fsi", time);
             static int counter = 0;
             std::string filename = out_dir + "/vtk/wheel." + std::to_string(counter++) + ".vtk";
             WriteWheelVTK(filename, wheel_mesh, wheel->GetFrameRefToAbs());
+            out_frame++;
         }
 
         // Render SPH particles
-#ifdef CHRONO_OPENGL
-        if (render && current_step % render_steps == 0) {
-            if (!fsi_vis.Render())
+#ifdef CHRONO_VSG
+        if (render && time >= render_frame / render_fps) {
+            if (!vis->Run())
                 break;
+            vis->Render();
+            render_frame++;
         }
 #endif
 
         // Call the FSI solver
-        sysFSI.DoStepDynamics_FSI();
+        sysFSI.DoStepDynamics(dT);
+
+        timer_CFD += sysFSI.GetTimerCFD();
+        timer_MBD += sysFSI.GetTimerMBD();
+        timer_FSI += sysFSI.GetTimerFSI();
+        timer_step += sysFSI.GetTimerStep();
+        if (verbose && sim_frame == 2000) {
+            cout << "Cummulative timers at time: " << time << endl;
+            cout << "   timer CFD:  " << timer_CFD << endl;
+            cout << "   timer MBD:  " << timer_MBD << endl;
+            cout << "   timer FSI:  " << timer_FSI << endl;
+            cout << "   timer step: " << timer_step << endl;
+        }
+
         time += dT;
-        current_step++;
+        sim_frame++;
     }
     timer.stop();
-    std::cout << "\nSimulation time: " << timer() << " seconds\n" << std::endl;
+    cout << "\nSimulation time: " << timer() << " seconds\n" << endl;
 
     if (output) {
         myFile.close();

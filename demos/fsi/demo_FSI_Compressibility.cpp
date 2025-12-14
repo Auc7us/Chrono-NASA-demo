@@ -9,7 +9,7 @@
 // http://projectchrono.org/license-chrono.txt.
 //
 // =============================================================================
-// Author: Milad Rakhsha, Arman Pazouki, Wei Hu
+// Author: Milad Rakhsha, Arman Pazouki, Wei Hu, Luning Bakke
 // =============================================================================
 
 #include <assert.h>
@@ -17,34 +17,31 @@
 #include <ctime>
 
 #include "chrono/physics/ChSystemSMC.h"
+#include "chrono/assets/ChVisualSystem.h"
 #include "chrono/utils/ChUtilsGenerators.h"
 
-#include "chrono_fsi/ChSystemFsi.h"
+#include "chrono_fsi/sph/ChFsiSystemSPH.h"
+#include "chrono_fsi/sph/ChFsiProblemSPH.h"
 
-#include "chrono_fsi/visualization/ChFsiVisualization.h"
-#ifdef CHRONO_OPENGL
-    #include "chrono_fsi/visualization/ChFsiVisualizationGL.h"
-#endif
+
 #ifdef CHRONO_VSG
-    #include "chrono_fsi/visualization/ChFsiVisualizationVSG.h"
+    #include "chrono_fsi/sph/visualization/ChSphVisualizationVSG.h"
 #endif
 
 #include "chrono_thirdparty/filesystem/path.h"
 
 using namespace chrono;
 using namespace chrono::fsi;
+using namespace chrono::fsi::sph;
 
 // -----------------------------------------------------------------
 
-// Run-time visualization system (OpenGL or VSG)
-ChVisualSystem::Type vis_type = ChVisualSystem::Type::VSG;
-
 // Output directories and settings
-const std::string out_dir = GetChronoOutputPath() + "FSI_Compressibility/";
+std::string out_dir = GetChronoOutputPath() + "FSI_Compressibility";
 
 // Output frequency
 bool output = true;
-double out_fps = 20;
+double output_fps = 20;
 
 // Size of the box
 double smalldis = 1.0e-5;
@@ -64,156 +61,153 @@ double t_end = 2.0;
 bool render = true;
 float render_fps = 1000;
 
-//------------------------------------------------------------------
-// Create the objects of the MBD system. Rigid bodies, and if fsi, their
-// bce representation are created and added to the systems
-//------------------------------------------------------------------
-void CreateSolidPhase(ChSystemSMC& sysMBS, ChSystemFsi& sysFSI) {
-    // Ground body
-    auto ground = chrono_types::make_shared<ChBody>();
-    ground->SetFixed(true);
-    ground->EnableCollision(false);
-    sysMBS.AddBody(ground);
-
-    // Container BCE markers
-    sysFSI.AddBoxContainerBCE(ground,                                         //
-                              ChFrame<>(ChVector3d(0, 0, bzDim / 2), QUNIT),  //
-                              ChVector3d(bxDim, byDim, bzDim),                //
-                              ChVector3i(2, 2, -1));
-}
-
 // =============================================================================
 
 int main(int argc, char* argv[]) {
+    // Create 
+    ChSystemSMC sysMBS;
+    sysMBS.SetCollisionSystemType(ChCollisionSystem::Type::BULLET); 
+
+    double initial_spacing = 0.1; // WCSPH
+    double step_size = 1e-4;
+
+
+    ChFsiProblemCartesian fsi(initial_spacing, &sysMBS);
+    auto sysFSI = fsi.GetFsiSystemSPH();
+
+
+    // Set gravitational acceleration
+    const ChVector3d gravity(0, 0, -1.0);
+    fsi.SetGravitationalAcceleration(gravity);
+    
+    // Set CFD fluid properties
+    ChFsiFluidSystemSPH::FluidProperties fluid_props;
+    fluid_props.density = 1000;
+    fluid_props.viscosity = 0.1;
+    fsi.SetCfdSPH(fluid_props);
+
+    // Set SPH solution parameters
+    ChFsiFluidSystemSPH::SPHParameters sph_params;
+    sph_params.integration_scheme = IntegrationScheme::RK2;
+    sph_params.initial_spacing = initial_spacing;
+    sph_params.num_bce_layers = 5;
+    sph_params.d0_multiplier = 1;
+    sph_params.max_velocity = 1.0;
+    sph_params.shifting_method = ShiftingMethod::NONE;
+    sph_params.use_consistent_gradient_discretization = false;
+    sph_params.use_consistent_laplacian_discretization = false;
+    sph_params.density_reinit_steps = 2;
+
+    fsi.SetStepSizeCFD(step_size);
+    fsi.SetStepsizeMBD(step_size); // do i need this? 
+
+
+
+    ChVector3d cMin = ChVector3d(-bxDim / 2, -byDim / 2, -bzDim / 2) - ChVector3d(initial_spacing * 20);
+    ChVector3d cMax = ChVector3d(+bxDim / 2, +byDim / 2, bzDim) + ChVector3d(initial_spacing * 10);
+    fsi.SetComputationalDomain(ChAABB(cMin, cMax), BC_ALL_PERIODIC);
+
+    ChVector3d fsize = ChVector3d(fxDim, fyDim, fzDim);
+    fsi.Construct(fsize,                          // length x width x depth
+                  ChVector3d(0, 0, 0),            // position of bottom origin
+                  BoxSide::ALL & ~BoxSide::Z_POS  // all boundaries except top
+    );
+
+
+    // Complete construction of the FSI system
+    fsi.Initialize();
+
+    auto sysSPH = fsi.GetFluidSystemSPH();
+    int numPart = sysSPH->GetNumFluidMarkers();
+
+
     // Create oputput directories
     if (!filesystem::create_directory(filesystem::path(out_dir))) {
         std::cerr << "Error creating directory " << out_dir << std::endl;
         return 1;
     }
-    if (!filesystem::create_directory(filesystem::path(out_dir + "/particles"))) {
-        std::cerr << "Error creating directory " << out_dir + "/particles" << std::endl;
+    out_dir = out_dir + "/" + sysSPH->GetPhysicsProblemString() + "_" + sysSPH->GetSphIntegrationSchemeString();
+    if (!filesystem::create_directory(filesystem::path(out_dir))) {
+        std::cerr << "Error creating directory " << out_dir << std::endl;
         return 1;
     }
 
-    // Create a physic system to handle multibody dynamics
-    ChSystemSMC sysMBS;
-
-    // Create an FSI system to handle fluid dynamics
-    ChSystemFsi sysFSI(&sysMBS);
-
-    // Use the default input file or you may enter your input parameters as a command line argument
-    std::string inputJson = GetChronoDataFile("fsi/input_json/demo_FSI_Compressibility_Explicit.json");
-    if (argc == 1) {
-        std::cout << "Use the default JSON file" << std::endl;
-    } else if (argc == 2) {
-        std::cout << "Use the specified JSON file" << std::endl;
-        std::string my_inputJson = std::string(argv[1]);
-        inputJson = my_inputJson;
-    } else {
-        std::cout << "usage: ./demo_FSI_Compressibility <json_file>" << std::endl;
-        return 1;
+    if (output) {
+        if (!filesystem::create_directory(filesystem::path(out_dir + "/particles"))) {
+            std::cerr << "Error creating directory " << out_dir + "/particles" << std::endl;
+            return 1;
+        }
     }
-    sysFSI.ReadParametersFromFile(inputJson);
-
-    auto initSpace0 = sysFSI.GetInitialSpacing();
-    ChVector3d cMin = ChVector3d(-bxDim / 2, -byDim / 2, -bzDim / 2) - ChVector3d(initSpace0 * 20);
-    ChVector3d cMax = ChVector3d(bxDim / 2, byDim / 2, bzDim) + ChVector3d(initSpace0 * 10);
-    sysFSI.SetBoundaries(cMin, cMax);
-
-    // Create an initial box for the terrain patch
-    chrono::utils::ChGridSampler<> sampler(initSpace0);
-
-    // Use a chrono sampler to create a bucket of granular material
-    ChVector3d boxCenter(0, 00, fzDim / 2);
-    ChVector3d boxHalfDim(fxDim / 2 - initSpace0, fyDim / 2 - initSpace0, fzDim / 2 - initSpace0);
-    std::vector<ChVector3d> points = sampler.SampleBox(boxCenter, boxHalfDim);
-
-    // Add SPH particles from the sampler points to the FSI system
-    size_t numPart = points.size();
-    for (int i = 0; i < numPart; i++) {
-        sysFSI.AddSPHParticle(points[i]);
-    }
-
-    // Create MBD and BCE particles for the solid domain
-    CreateSolidPhase(sysMBS, sysFSI);
-    sysFSI.SetInitPressure(fzDim);
-
-    // Complete construction of the FSI system
-    sysFSI.Initialize();
 
     // Create a run-tme visualizer
-#ifndef CHRONO_OPENGL
-    if (vis_type == ChVisualSystem::Type::OpenGL)
-        vis_type = ChVisualSystem::Type::VSG;
-#endif
-#ifndef CHRONO_VSG
-    if (vis_type == ChVisualSystem::Type::VSG)
-        vis_type = ChVisualSystem::Type::OpenGL;
-#endif
-#if !defined(CHRONO_OPENGL) && !defined(CHRONO_VSG)
+    std::shared_ptr<ChVisualSystem> vis;
+
+#ifdef CHRONO_VSG
+    if (render) {
+        // FSI plugin
+        auto col_callback = chrono_types::make_shared<ParticleVelocityColorCallback>(0, 5.0);
+
+        auto visFSI = chrono_types::make_shared<ChSphVisualizationVSG>(sysFSI.get());
+        visFSI->EnableFluidMarkers(true);
+        visFSI->EnableBoundaryMarkers(true);
+        visFSI->EnableRigidBodyMarkers(false);
+        visFSI->SetSPHColorCallback(col_callback);
+
+        // VSG visual system (attach visFSI as plugin)
+        auto visVSG = chrono_types::make_shared<vsg3d::ChVisualSystemVSG>();
+        visVSG->AttachPlugin(visFSI);
+        visVSG->AttachSystem(&sysMBS);
+        visVSG->SetWindowTitle("Compressibility Test");
+        visVSG->SetWindowSize(1280, 800);
+        visVSG->SetWindowPosition(100, 100);
+        visVSG->AddCamera(ChVector3d(0, -5 * byDim, 0.5 * bzDim), ChVector3d(0, 0, 0.5 * bzDim));
+
+        visVSG->Initialize();
+        vis = visVSG;
+    }
+#else
     render = false;
 #endif
 
-    std::shared_ptr<ChFsiVisualization> visFSI;
-    if (render) {
-        switch (vis_type) {
-            case ChVisualSystem::Type::OpenGL:
-#ifdef CHRONO_OPENGL
-                visFSI = chrono_types::make_shared<ChFsiVisualizationGL>(&sysFSI);
-#endif
-                break;
-            case ChVisualSystem::Type::VSG: {
-#ifdef CHRONO_VSG
-                visFSI = chrono_types::make_shared<ChFsiVisualizationVSG>(&sysFSI);
-#endif
-                break;
-            }
-        }
-
-        visFSI->SetTitle("Chrono::FSI compressibility test");
-        visFSI->AddCamera(ChVector3d(0, -5 * byDim, 0.5 * bzDim), ChVector3d(0, 0, 0.5 * bzDim));
-        visFSI->SetCameraMoveScale(1.0f);
-        visFSI->EnableFluidMarkers(true);
-        visFSI->EnableBoundaryMarkers(true);
-        visFSI->SetRenderMode(ChFsiVisualization::RenderMode::SOLID);
-        visFSI->SetSPHColorCallback(chrono_types::make_shared<VelocityColorCallback>(0, 5.0));
-        visFSI->Initialize();
-    }
-
     // Start the simulation
-    double dT = sysFSI.GetStepSize();
-    unsigned int output_steps = (unsigned int)round(1 / (out_fps * dT));
-    unsigned int render_steps = (unsigned int)round(1 / (render_fps * dT));
-
     std::ofstream outf;
     std::string delim = ",";
     outf.open((out_dir + "/Analysis.txt"), std::ios::trunc);
     outf << "Time" << delim << "Rho_fluid" << delim << "k_fluid" << std::endl;
 
-    double time = 0;
-    int current_step = 0;
+    double time = 0.0;
+    int sim_frame = 0;
+    int out_frame = 0;
+    int render_frame = 0;
 
     ChTimer timer;
     timer.start();
+
+
     while (time < t_end) {
-        std::cout << "step: " << current_step << "  time: " << time << std::endl;
+        std::cout << "step: " << sim_frame << "  time: " << time << std::endl;
 
         // Save data of the simulation
-        if (output && current_step % output_steps == 0) {
+        if (output && time >= out_frame / output_fps) {
             std::cout << "------- OUTPUT" << std::endl;
-            sysFSI.PrintParticleToFile(out_dir + "/particles");
+            fsi.SaveOutputData(time, out_dir + "/particles", "");
+            out_frame++;
         }
 
         // Render FSI system
-        if (render && current_step % render_steps == 0) {
-            if (!visFSI->Render())
+#ifdef CHRONO_VSG
+        if (render && time >= render_frame / render_fps) {
+            if (!vis->Run())
                 break;
+            vis->Render();
+            render_frame++;
         }
+#endif
 
-        sysFSI.DoStepDynamics_FSI();
+        fsi.DoStepDynamics(step_size);
 
-        auto rhoPresMu = sysFSI.GetParticleFluidProperties();
-        auto vel = sysFSI.GetParticleVelocities();
+        auto rhoPresMu = sysSPH->GetParticleFluidProperties();
+        auto vel = sysSPH->GetParticleVelocities();
 
         double KE = 0;
         double Rho = 0;
@@ -222,11 +216,13 @@ int main(int argc, char* argv[]) {
             Rho += rhoPresMu[i].x();
         }
 
-        outf << time << delim << Rho / numPart << delim << sysFSI.GetParticleMass() * KE / numPart << std::endl;
+        outf << time << delim << Rho / numPart << delim << sysSPH->GetParticleMass() * KE / numPart << std::endl;
 
-        time += dT;
-        current_step++;
+        time += step_size;
+        sim_frame++;
     }
+
+    outf.close();
     timer.stop();
     std::cout << "\nSimulation time: " << timer() << " seconds\n" << std::endl;
 

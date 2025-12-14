@@ -28,6 +28,7 @@
 // =============================================================================
 
 #include <cstdio>
+#include <cmath>
 
 #include "chrono/utils/ChUtils.h"
 
@@ -71,7 +72,7 @@ void ChSteeringController::StartDataCollection() {
         return;
     // Create the ChWriterCSV object if needed (first call to this function).
     if (!m_csv) {
-        m_csv = new utils::ChWriterCSV("\t");
+        m_csv = new ChWriterCSV("\t");
         m_csv->Stream().setf(std::ios::scientific | std::ios::showpos);
         m_csv->Stream().precision(6);
     }
@@ -344,7 +345,7 @@ double ChPathSteeringControllerXT::CalcAckermannAngle() {
     // delta = L/R = L * sin(alpha) / L
     //
     // alpha scales linearly with the steering input
-    return sin(m_res * m_max_wheel_turn_angle);
+    return std::sin(m_res * m_max_wheel_turn_angle);
 }
 
 double ChPathSteeringControllerXT::Advance(const ChFrameMoving<>& ref_frame, double time, double step) {
@@ -444,7 +445,7 @@ ChPathSteeringControllerSR::ChPathSteeringControllerSR(std::shared_ptr<ChBezierC
       m_delta_max(max_wheel_turn_angle),
       m_umin(2),
       m_idx_curr(0) {
-    // retireve points
+    // retrieve points
     CalcPathPoints();
 }
 
@@ -460,7 +461,7 @@ ChPathSteeringControllerSR::ChPathSteeringControllerSR(const std::string& filena
       m_delta_max(max_wheel_turn_angle),
       m_umin(1),
       m_idx_curr(0) {
-    // retireve points
+    // retrieve points
     CalcPathPoints();
 
     Document d;
@@ -717,7 +718,7 @@ double ChPathSteeringControllerStanley::Advance(const ChFrameMoving<>& ref_frame
     if (m_deadZone > 0.0)
         w = ChFunctionSineStep::Eval(std::abs(err), m_deadZone, 0.0, 2.0 * m_deadZone, 1.0);
     err *= w;
-    double err_dot = -u * sin(atan(m_Kp * err / ChClamp(u, m_umin, u)));
+    double err_dot = -u * std::sin(std::atan(m_Kp * err / ChClamp(u, m_umin, u)));
     // Calculate the heading error
     ChVector3d veh_head = ref_frame.GetRotMat().GetAxisX();  // vehicle forward direction (ISO frame)
     ChVector3d path_head = m_ptangent;
@@ -731,7 +732,7 @@ double ChPathSteeringControllerStanley::Advance(const ChFrameMoving<>& ref_frame
     double h_err = CalcHeadingError(veh_head, path_head);
 
     // control law
-    m_delta = h_err + atan(m_Kp * err / ChClamp(u, m_umin, u)) + m_Kd * err_dot + m_Ki * m_erri;
+    m_delta = h_err + std::atan(m_Kp * err / ChClamp(u, m_umin, u)) + m_Kd * err_dot + m_Ki * m_erri;
     double steer = ChClamp(m_delta / m_delta_max, -1.0, 1.0);
     m_Treset -= step;
     if (m_Treset <= 0.0) {
@@ -767,6 +768,132 @@ double ChPathSteeringControllerStanley::CalcHeadingError(ChVector3d& a, ChVector
 
     return ang;
 }
+
+// -----------------------------------------------------------------------------
+// Implementation of the derived class ChPathSteeringControllerPP.
+// -----------------------------------------------------------------------------
+// This is called the "Pure Pursuit" Controller, it is based on vehicle geometry
+// "Pure Pursuit" path-following controller
+// This implementation is based on the CARLA Pure Pursuit controller:
+// https://carla.org//
+// https://thomasfermi.github.io/Algorithms-for-Automated-Driving/Control/PurePursuit.html
+// Original algorithm documented at:
+// https://www.ri.cmu.edu/pub_files/pub3/coulter_r_craig_1992_1/coulter_r_craig_1992_1.pdf
+//
+ChPathSteeringControllerPP::ChPathSteeringControllerPP(std::shared_ptr<ChBezierCurve> path,
+                                                       double max_wheel_turn_angle,
+                                                       double wheel_base)
+    : m_Kdd(0), m_deltaMax(max_wheel_turn_angle), m_L(wheel_base), m_Vstart(2), ChSteeringController(path) {
+    m_dist = 0;
+    m_tracker = std::unique_ptr<ChBezierCurveTracker>(new ChBezierCurveTracker(path));
+}
+
+ChPathSteeringControllerPP::ChPathSteeringControllerPP(const std::string& filename,
+                                                       std::shared_ptr<ChBezierCurve> path,
+                                                       double max_wheel_turn_angle,
+                                                       double wheel_base)
+    : m_Kdd(0), m_deltaMax(max_wheel_turn_angle), m_L(wheel_base), m_Vstart(2), ChSteeringController(path) {
+    m_dist = 0;
+    m_tracker = std::unique_ptr<ChBezierCurveTracker>(new ChBezierCurveTracker(path));
+
+    Document d;
+    ReadFileJSON(filename, d);
+    if (d.IsNull())
+        return;
+
+    if (d.HasMember("Kdd")) {
+        m_Kdd = d["Kdd"].GetDouble();
+    } else {
+        m_Kdd = 0;
+    }
+    if (d.HasMember("Vstart")) {
+        m_Vstart = d["Vstart"].GetDouble();
+    } else {
+        m_Vstart = 2.0;
+    }
+    if (d.HasMember("Lookahead Distance")) {
+        m_dist = d["Lookahead Distance"].GetDouble();
+    } else {
+        m_dist = 5.0;
+    }
+    std::cout << "Loaded JSON " << filename << std::endl;
+}
+
+void ChPathSteeringControllerPP::CalcTargetLocation() {
+    // Let the underlying tracker do its magic.
+    // we need more information about the path properties here:
+    ChFrame<> tnb;
+
+    m_tracker->CalcClosestPoint(m_sentinel, tnb, m_pcurvature);
+    m_target = tnb.GetPos();
+    m_ptangent = tnb.GetRot().GetAxisX();
+}
+
+double ChPathSteeringControllerPP::CalcHeadingError(ChVector3d& a, ChVector3d& b) {
+    double ang = 0.0;
+
+    // chassis orientation
+    ChWorldFrame::Project(a);
+    ChWorldFrame::Project(b);
+    a.Normalize();
+    b.Normalize();
+
+    ChVector3d vpc;
+    vpc = Vcross(a, b);
+    ang = std::asin(ChWorldFrame::Height(vpc));
+
+    return ang;
+}
+
+double ChPathSteeringControllerPP::Advance(const ChFrameMoving<>& ref_frame, double time, double step) {
+    double u = Vdot(ref_frame.GetPosDt(), ref_frame.GetRotMat().GetAxisX());  // vehicle forward speed
+    // eff. preview distance can be influenced by m_Kdd, if desired
+    double dist = std::max(m_Kdd * u, m_dist);
+    // Calculate current "sentinel" location.  This is a point at the look-ahead distance in front of the vehicle.
+    m_sentinel = ref_frame.TransformPointLocalToParent(dist * ChWorldFrame::Forward());
+
+    // Calculate current "target" location.
+    CalcTargetLocation();
+
+    // If data collection is enabled, append current target and sentinel locations.
+    if (m_collect) {
+        *m_csv << time << m_target << m_sentinel << std::endl;
+    }
+
+    // The "error" vector is the projection onto the horizontal plane of the vector between sentinel and target.
+    ChVector3d err_vec = m_target - m_sentinel;
+    ChWorldFrame::Project(err_vec);
+
+    // Calculate the heading error
+    ChVector3d veh_head = ref_frame.GetRotMat().GetAxisX();  // vehicle forward direction (ISO frame)
+    ChVector3d path_head = m_ptangent;
+
+    // Calculate the sign of the angle between the projections of the sentinel
+    // vector and the target vector (with origin at vehicle location).
+    ChVector3d sentinel_vec = m_sentinel - ref_frame.GetPos();
+    ChWorldFrame::Project(sentinel_vec);
+    ChVector3d target_vec = m_target - ref_frame.GetPos();
+    ChWorldFrame::Project(target_vec);
+
+    // if the vehicle stands still or is moving slowly, steering has no effect
+    // and would lead to oscillations
+    double ascale = ChFunctionSineStep::Eval(u, 0.0, 0.0, m_Vstart, 1.0);
+    double alpha = ascale * Vdot(Vcross(sentinel_vec, target_vec), ChWorldFrame::Vertical());
+
+    // Calculate current lateral error, unused, maybe interesting as information
+    // double err = ChSignum(alpha) * err_vec.Length();
+
+    // the pure pursuit controller gets more and more aggressive with speed
+    // to lower aggressivity the preview distance can be increased
+    double delta =
+        std::atan(2.0 * m_L * std::sin(alpha) / (m_L + dist));  // predicted wheel turn angle to reach m_target
+
+    delta = ChClamp(delta, -m_deltaMax, m_deltaMax);  // clamp to allowed values
+
+    return delta / m_deltaMax;  // return steering signal [-1:1]
+}
+
+void ChPathSteeringControllerPP::Reset(const ChFrameMoving<>& ref_frame) {}
 
 }  // end namespace vehicle
 }  // end namespace chrono

@@ -32,7 +32,7 @@
 
 #include "chrono/physics/ChSystemSMC.h"
 #include "chrono/assets/ChVisualShapeBox.h"
-#include "chrono_vehicle/ChVehicleModelData.h"
+#include "chrono_vehicle/ChVehicleDataPath.h"
 #include "chrono_vehicle/ChWorldFrame.h"
 #include "chrono_vehicle/driver/ChPathFollowerDriver.h"
 #include "chrono_vehicle/driver/ChHumanDriver.h"
@@ -52,6 +52,7 @@
 enum class DriverModelType {
     PID,      // pure PID lateral controller with constant speed controller
     STANLEY,  // geometrical P heading and PID lateral controller with constant speed controller
+    PP,       // geometrical P lateral controller with constant speed controller
     XT,       // alternative PID lateral controller with constant speed controller
     SR,       // alternative PID lateral controller with constant speed controller
     HUMAN     // simple realistic human driver
@@ -81,13 +82,15 @@ DriverModelType DriverModelFromString(const std::string& str) {
         return DriverModelType::PID;
     if (str == "STANLEY")
         return DriverModelType::STANLEY;
+    if (str == "PP")
+        return DriverModelType::PP;
     if (str == "SR")
         return DriverModelType::SR;
     if (str == "XT")
         return DriverModelType::XT;
-    std::cerr << "String \"" + str +
-                     "\" does not represent a valid DriverModelType (HUMAN/PID/SR/XT) - returned DriverModelType::HUMAN"
-              << std::endl;
+
+    std::cerr << str + "is not a valid DriverModelType (HUMAN/PID/STANLEY/PP/SR/XT)." << std::endl;
+    std::cerr << "Fall back on DriverModelType::HUMAN" << std::endl;
     return DriverModelType::HUMAN;
 }
 
@@ -125,6 +128,19 @@ class MyDriver {
                 m_steering_controller = &driverStanley->GetSteeringController();
                 break;
             }
+            case DriverModelType::PP: {
+                m_driver_type = "PP";
+
+                auto driverPP =
+                    chrono_types::make_shared<ChPathFollowerDriverPP>(vehicle, path, "my_path", target_speed);
+                driverPP->GetSteeringController().SetLookAheadDistance(5.0);
+                driverPP->GetSteeringController().SetGain(0.0);
+                driverPP->GetSpeedController().SetGains(0.4, 0, 0);
+
+                m_driver = driverPP;
+                m_steering_controller = &driverPP->GetSteeringController();
+                break;
+            }
             case DriverModelType::XT: {
                 m_driver_type = "XT";
 
@@ -156,7 +172,7 @@ class MyDriver {
 
                 // Driver model read from JSON file
                 ////auto driverHUMAN = chrono_types::make_shared<ChHumanDriver>(
-                ////    vehicle::GetDataFile("hmmwv/driver/HumanController.json"), vehicle, path, "my_path",
+                ////    GetVehicleDataFile("hmmwv/driver/HumanController.json"), vehicle, path, "my_path",
                 ////    road_width, vehicle.GetMaxSteeringAngle(), 3.2);
 
                 auto driverHUMAN = chrono_types::make_shared<ChHumanDriver>(vehicle, path, "my_path", road_width,
@@ -226,7 +242,7 @@ int main(int argc, char* argv[]) {
     std::string crg_road_file = "terrain/crg_roads/RoadCourse.crg";
     bool yup = false;
 
-    cli.AddOption<std::string>("Demo", "m,model", "Controller model type - PID, STANLEY, XT, SR, HUMAN", "HUMAN");
+    cli.AddOption<std::string>("Demo", "m,model", "Controller model type - PID, STANLEY, PP, XT, SR, HUMAN", "HUMAN");
     cli.AddOption<std::string>("Demo", "f,roadfile", "CRG road filename", crg_road_file);
     cli.AddOption<bool>("Demo", "y,yup", "Use YUP world frame", std::to_string(yup));
 
@@ -234,7 +250,7 @@ int main(int argc, char* argv[]) {
         return 1;
 
     driver_type = DriverModelFromString(cli.GetAsType<std::string>("model"));
-    crg_road_file = vehicle::GetDataFile(cli.GetAsType<std::string>("roadfile"));
+    crg_road_file = GetVehicleDataFile(cli.GetAsType<std::string>("roadfile"));
     yup = cli.GetAsType<bool>("yup");
 
     // ---------------
@@ -291,7 +307,7 @@ int main(int argc, char* argv[]) {
 
     terrain.GetGround()->AddVisualShape(chrono_types::make_shared<ChVisualShapeBox>(ChBox(1, road_width, 1)),
                                         ChFrame<>(init_csys.pos - 0.5 * ChWorldFrame::Vertical(), init_csys.rot));
-
+     
     // ------------------
     // Create the vehicle
     // ------------------
@@ -352,7 +368,7 @@ int main(int argc, char* argv[]) {
     vis->SetWindowSize(1200, 800);
     vis->SetChaseCamera(vehicle_model->TrackPoint(), vehicle_model->CameraDistance(), vehicle_model->CameraHeight());
     vis->SetLightDirection(1.5 * CH_PI_2, CH_PI_4);
-    vis->SetShadows(true);
+    vis->EnableShadows();
     vis->AttachVehicle(&vehicle);
     vis->AttachTerrain(&terrain);
 

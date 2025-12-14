@@ -40,7 +40,7 @@
 #include "chrono/physics/ChSystemNSC.h"
 #include "chrono/solver/ChIterativeSolverLS.h"
 #include "chrono/utils/ChConstants.h"
-#include "chrono/utils/ChUtilsInputOutput.h"
+#include "chrono/input_output/ChWriterCSV.h"
 #include "chrono/utils/ChUtilsValidation.h"
 
 #include "chrono/fea/ChElementShellANCF_3423.h"
@@ -113,14 +113,14 @@ int main(int argc, char* argv[]) {
     // Create and add the nodes
     for (int i = 0; i < TotalNumNodes; i++) {
         // Node location
-        double loc_x = cylRadius * sin((i % (numDiv_x + 1)) * (CH_PI / 2) / numDiv_x);
+        double loc_x = cylRadius * std::sin((i % (numDiv_x + 1)) * (CH_PI / 2) / numDiv_x);
         double loc_y = (i / (numDiv_x + 1)) % (numDiv_y + 1) * dy;
-        double loc_z = cylRadius * (1 - cos((i % (numDiv_x + 1)) * (CH_PI / 2) / numDiv_x));
+        double loc_z = cylRadius * (1 - std::cos((i % (numDiv_x + 1)) * (CH_PI / 2) / numDiv_x));
 
         // Node direction
-        double dir_x = -sin(CH_PI / 2 / numDiv_x * (i % (numDiv_x + 1)));
+        double dir_x = -std::sin(CH_PI / 2 / numDiv_x * (i % (numDiv_x + 1)));
         double dir_y = 0;
-        double dir_z = cos(CH_PI / 2 / numDiv_x * (i % (numDiv_x + 1)));
+        double dir_z = std::cos(CH_PI / 2 / numDiv_x * (i % (numDiv_x + 1)));
 
         // Create the node
         auto node =
@@ -221,7 +221,7 @@ int main(int argc, char* argv[]) {
     m_data.resize(4);
     for (size_t col = 0; col < 4; col++)
         m_data[col].resize(num_steps);
-    utils::ChWriterCSV csv(" ");
+    ChWriterCSV csv(" ");
     std::ifstream file2("UT_ANCFShellLam.txt");*/
 
     ChVector3d mforce(0, 0, -10);
@@ -234,7 +234,7 @@ int main(int argc, char* argv[]) {
         sys.DoStepDynamics(time_step);
         std::cout << "Time t = " << sys.GetChTime() << "s \n";
         // std::cout << "nodetip->pos.z = " << nodetip->pos.z << "\n";
-        // std::cout << "mystepper->GetNumIterations()= " << mystepper->GetNumIterations() << "\n";
+        // std::cout << "mystepper->GetNumStepIterations()= " << mystepper->GetNumStepIterations() << "\n";
         // Checking tip Z displacement
         double err = std::abs(nodetip->pos.z() - FileInputMat(it, 1));
         max_err = std::max(max_err, err);

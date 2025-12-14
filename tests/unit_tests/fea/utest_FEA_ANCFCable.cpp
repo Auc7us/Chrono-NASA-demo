@@ -31,9 +31,8 @@
 #include "chrono/physics/ChLoadContainer.h"
 #include "chrono/physics/ChSystemNSC.h"
 #include "chrono/solver/ChIterativeSolverLS.h"
-#include "chrono/timestepper/ChTimestepper.h"
 #include "chrono/utils/ChConstants.h"
-#include "chrono/utils/ChUtilsInputOutput.h"
+#include "chrono/input_output/ChWriterCSV.h"
 #include "chrono/utils/ChUtilsValidation.h"
 #include "chrono/fea/ChElementCableANCF.h"
 #include "chrono/fea/ChLinkNodeSlopeFrame.h"
@@ -65,7 +64,7 @@ int main(int argc, char* argv[]) {
     }
     fileMid.close();
 
-    // Create a Chrono::Engine physical system
+    // Create a Chrono physical system
     ChSystemNSC sys;
     unsigned int num_steps = 200;
     utils::Data m_data;  // Matrices to store data
@@ -82,11 +81,11 @@ int main(int argc, char* argv[]) {
     double rho = 0.0;
 
     auto msection_cable = chrono_types::make_shared<ChBeamSectionCable>();
-    diam = sqrt(1e-6 / CH_PI) * 2.0 * f_const;
+    diam = std::sqrt(1e-6 / CH_PI) * 2.0 * f_const;
     msection_cable->SetDiameter(diam);
-    msection_cable->SetYoungModulus(1e9 / pow(f_const, 4));
-    msection_cable->SetInertia(CH_PI / 4.0 * pow(diam / 2, 4));
-    rho = 8000 / pow(f_const, 2);
+    msection_cable->SetYoungModulus(1e9 / std::pow(f_const, 4));
+    msection_cable->SetInertia(CH_PI / 4.0 * std::pow(diam / 2, 4));
+    rho = 8000 / std::pow(f_const, 2);
     msection_cable->SetDensity(rho);
 
     // Create the nodes
@@ -169,7 +168,7 @@ int main(int argc, char* argv[]) {
     }
 
     /* m_data.resize(7);
-     utils::ChWriterCSV csv(" ");
+     ChWriterCSV csv(" ");
      std::ifstream file2("UT_ANCFBeam.txt");
 
      for (size_t col = 0; col < 7; col++)

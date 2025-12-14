@@ -34,7 +34,7 @@
 
 #include "chrono/core/ChBezierCurve.h"
 #include "chrono/core/ChFrameMoving.h"
-#include "chrono/utils/ChUtilsInputOutput.h"
+#include "chrono/input_output/ChWriterCSV.h"
 #include "chrono/utils/ChFilters.h"
 
 #include "chrono_vehicle/ChApiVehicle.h"
@@ -119,7 +119,7 @@ class CH_VEHICLE_API ChSteeringController {
     double m_errd;  ///< error derivative
     double m_erri;  ///< integral of error
 
-    utils::ChWriterCSV* m_csv;  ///< ChWriterCSV object for data collection
+    ChWriterCSV* m_csv;  ///< ChWriterCSV object for data collection
     bool m_collect;             ///< flag indicating whether or not data is being collected
 };
 
@@ -187,7 +187,7 @@ class CH_VEHICLE_API ChPathSteeringController : public ChSteeringController {
 /// The path to be followed is specified as a ChBezierCurve object and the target point is defined to be the point on
 /// that path that is closest to the current location of the sentinel point. The sentinel point should never leave the
 /// end or beginning of the path.
-/// The controller is sensitive to tire relaxiation, when steering oscillations occure and do not calm down after a
+/// The controller is sensitive to tire relaxation, when steering oscillations occur and do not calm down after a
 /// short driving distance, Kp should be reduced carefully.
 class CH_VEHICLE_API ChPathSteeringControllerXT : public ChSteeringController {
   public:
@@ -292,7 +292,7 @@ class CH_VEHICLE_API ChPathSteeringControllerSR : public ChSteeringController {
     /// Calculate the current target point location.
     /// The target point is the point on the associated path that is closest to the current location of the sentinel
     /// point.
-    virtual void CalcTargetLocation() override{};
+    virtual void CalcTargetLocation() override {};
 
   private:
     void CalcPathPoints();  ///< extracts path points and direction vectors, make adjustments as needed
@@ -302,9 +302,9 @@ class CH_VEHICLE_API ChPathSteeringControllerSR : public ChSteeringController {
     double m_Klat;       ///< lateral controller gain factor
     double m_Kug;        ///< understeering gradient in °/g, can be set to 0 if unknown
     double m_Tp;         ///< prediction time
-    double m_L;          ///< effective axlespace (bycicle model)
-    double m_delta;      ///< average turn angle of the steered wheels (bycicle model of the vehicle)
-    double m_delta_max;  ///< max. allowed average turn angle of the steered wheels (bycicle model of the vehicle)
+    double m_L;          ///< effective axlespace (bicycle model)
+    double m_delta;      ///< average turn angle of the steered wheels (bicycle model of the vehicle)
+    double m_delta_max;  ///< max. allowed average turn angle of the steered wheels (bicycle model of the vehicle)
     double m_umin;       ///< threshold where the controller gets active
 
     size_t m_idx_curr;             ///< current interval index
@@ -315,7 +315,7 @@ class CH_VEHICLE_API ChPathSteeringControllerSR : public ChSteeringController {
 
 // --------------------------------------------------------------------------------------------------------------------
 
-/// "Stanley" path-following ontroller named after an autonomous vehicle called Stanley.
+/// "Stanley" path-following controller named after an autonomous vehicle called Stanley.
 /// It minimizes lateral error and heading error. Time delay of the driver's reaction is considered.
 /// This driver can be parametrized by a PID json file. It can consider a dead zone left and right to the
 /// path, where no path information is recognized. This can be useful when the path information contains
@@ -374,12 +374,71 @@ class CH_VEHICLE_API ChPathSteeringControllerStanley : public ChSteeringControll
     double m_Ki;  ///< Integral gain
     double m_Kd;  ///< Differential gain
 
-    double m_delta;      ///< average turn angle of the steered wheels (bycicle model of the vehicle)
-    double m_delta_max;  ///< max. allowed average turn angle of the steered wheels (bycicle model of the vehicle)
+    double m_delta;      ///< average turn angle of the steered wheels (bicycle model of the vehicle)
+    double m_delta_max;  ///< max. allowed average turn angle of the steered wheels (bicycle model of the vehicle)
     double m_umin;       ///< threshold where the controller gets active
     double m_Treset;     ///< the integral error gets reset after this time automatically, no wind-up should happen
     double m_deadZone;  ///< lateral zone where no lateral error is recognized, reduces sensitivity to path disturbances
     double m_Tdelay;    ///< delay time to consider driver reaction (around 0.4 sec)
+};
+
+// --------------------------------------------------------------------------------------------------------------------
+/// "Pure Pursuit" path-following controller
+/// This implementation is based on the CARLA Pure Pursuit controller:
+/// https://carla.org//
+/// https://thomasfermi.github.io/Algorithms-for-Automated-Driving/Control/PurePursuit.html
+/// Original algorithm documented at:
+/// https://www.ri.cmu.edu/pub_files/pub3/coulter_r_craig_1992_1/coulter_r_craig_1992_1.pdf
+//
+class CH_VEHICLE_API ChPathSteeringControllerPP : public ChSteeringController {
+  public:
+    /// Construct a steering controller to track the specified path.
+    /// This version uses default controller parameters (zero gains).
+    /// The user is responsible for calling SetGains and SetLookAheadDistance.
+    ChPathSteeringControllerPP(std::shared_ptr<ChBezierCurve> path,
+                               double max_wheel_turn_angle = 0.0,
+                               double wheel_base = 2.0);
+
+    /// Construct a steering controller to track the specified path.
+    /// This version reads controller gains and lookahead distance from the specified JSON file.
+    ChPathSteeringControllerPP(const std::string& filename,
+                               std::shared_ptr<ChBezierCurve> path,
+                               double max_wheel_turn_angle = 0.0,
+                               double wheel_base = 2.0);
+
+    ~ChPathSteeringControllerPP() {}
+
+    /// Set the gain for the PP controller
+    void SetGain(double Kd) { m_Kdd = Kd; }
+
+    void SetPreviewDistance(double pvd) { m_dist = pvd; }
+
+    void SetStartSpeed(double v_start) { m_Vstart = v_start; }
+
+    /// Advance the state of the Stanley controller.
+    virtual double Advance(const ChFrameMoving<>& ref_frame, double time, double step) override;
+
+    /// Reset the PID controller.
+    /// This function resets the underlying path tracker using the current location of the sentinel point.
+    virtual void Reset(const ChFrameMoving<>& ref_frame) override;
+
+    /// Calculate the current target point location.
+    /// The target point is the point on the associated path that is closest to the current location of the sentinel
+    /// point.
+    virtual void CalcTargetLocation() override;
+
+    double CalcHeadingError(ChVector3d& a, ChVector3d& b);
+
+  private:
+    std::unique_ptr<ChBezierCurveTracker> m_tracker;  ///< path tracker
+
+    double m_pcurvature;    ///< local curvature
+    ChVector3d m_ptangent;  ///< local path tangent
+
+    double m_deltaMax;  ///< Maximum wheel turn angle
+    double m_L;         ///< Vehicle wheel base
+    double m_Kdd;        ///< Proportional gain for speed sensitivity
+    double m_Vstart;    ///< speed, at which the pure pursuit controller engages
 };
 
 /// @} vehicle_utils

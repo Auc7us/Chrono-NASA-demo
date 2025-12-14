@@ -17,19 +17,16 @@
 // =============================================================================
 
 #include <vector>
+#include <cmath>
 
 #include "chrono/physics/ChBodyEasy.h"
 #include "chrono/physics/ChLinkMate.h"
 #include "chrono/physics/ChSystemSMC.h"
-#include "chrono/timestepper/ChTimestepper.h"
 
 #include "chrono/fea/ChElementShellReissner4.h"
 #include "chrono/fea/ChLinkNodeSlopeFrame.h"
 #include "chrono/fea/ChLinkNodeFrame.h"
 #include "chrono/fea/ChMesh.h"
-#include "chrono/assets/ChVisualShapeFEA.h"
-
-#include "chrono_irrlicht/ChVisualSystemIrrlicht.h"
 
 #include "chrono_pardisomkl/ChSolverPardisoMKL.h"
 
@@ -37,13 +34,13 @@
 
 #include "chrono_thirdparty/filesystem/path.h"
 
-// Remember to use the namespace 'chrono' because all classes
-// of Chrono::Engine belong to this namespace and its children...
+#include "FEAvisualization.h"
 
 using namespace chrono;
 using namespace chrono::fea;
-using namespace chrono::irrlicht;
 using namespace chrono::postprocess;
+
+ChVisualSystem::Type vis_type = ChVisualSystem::Type::VSG;
 
 int main(int argc, char* argv[]) {
     std::cout << "Copyright (c) 2017 projectchrono.org\nChrono version: " << CHRONO_VERSION << std::endl;
@@ -55,7 +52,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // Create a Chrono::Engine physical system
+    // Create a Chrono physical system
     ChSystemSMC sys;
 
     // Create a mesh, that is a container for groups
@@ -217,8 +214,8 @@ int main(int argc, char* argv[]) {
                 // Make nodes
                 double u = ((double)iu / (double)nels_U);
                 double w = ((double)iw / (double)nels_W);
-                ChVector3d nodepos((plate_Ri + (plate_Ro - plate_Ri) * w) * cos(u * arc), 0,
-                                   (plate_Ri + (plate_Ro - plate_Ri) * w) * sin(u * arc));
+                ChVector3d nodepos((plate_Ri + (plate_Ro - plate_Ri) * w) * std::cos(u * arc), 0,
+                                   (plate_Ri + (plate_Ro - plate_Ri) * w) * std::sin(u * arc));
                 ChQuaternion<> noderot(QUNIT);
                 ChFrame<> nodeframe(nodepos, noderot);
 
@@ -326,7 +323,7 @@ int main(int argc, char* argv[]) {
                 // Make nodes
                 double u = ((double)iu / (double)nels_U);
                 double w = ((double)iw / (double)nels_W);
-                ChVector3d nodepos((plate_R)*cos(w * arc), (plate_R)*sin(w * arc), u * plate_L);
+                ChVector3d nodepos((plate_R)*std::cos(w * arc), (plate_R)*std::sin(w * arc), u * plate_L);
                 ChQuaternion<> noderot(QUNIT);
                 ChFrame<> nodeframe(nodepos, noderot);
 
@@ -412,35 +409,28 @@ int main(int argc, char* argv[]) {
     // Such triangle mesh can be rendered by Irrlicht or POVray or whatever
     // postprocessor that can handle a colored ChVisualShapeTriangleMesh).
 
-    auto mvisualizeshellA = chrono_types::make_shared<ChVisualShapeFEA>(my_mesh);
+    auto mvisualizeshellA = chrono_types::make_shared<ChVisualShapeFEA>();
     mvisualizeshellA->SetSmoothFaces(true);
     mvisualizeshellA->SetWireframe(true);
     my_mesh->AddVisualShapeFEA(mvisualizeshellA);
     /*
-    auto mvisualizeshellB = chrono_types::make_shared<ChVisualShapeFEA>(my_mesh);
+    auto mvisualizeshellB = chrono_types::make_shared<ChVisualShapeFEA>();
     mvisualizeshellB->SetFEMdataType(ChVisualShapeFEA::DataType::NONE);
     mvisualizeshellB->SetFEMglyphType(ChVisualShapeFEA::GlyphType::NODE_DOT_POS);
     mvisualizeshellB->SetSymbolsThickness(0.01);
     my_mesh->AddVisualShapeFEA(mvisualizeshellB);
     */
 
-    auto mvisualizeshellC = chrono_types::make_shared<ChVisualShapeFEA>(my_mesh);
+    auto mvisualizeshellC = chrono_types::make_shared<ChVisualShapeFEA>();
     mvisualizeshellC->SetFEMdataType(ChVisualShapeFEA::DataType::NONE);
     // mvisualizeshellC->SetFEMglyphType(ChVisualShapeFEA::GlyphType::NODE_CSYS);
     mvisualizeshellC->SetSymbolsThickness(0.05);
     mvisualizeshellC->SetZbufferHide(false);
     my_mesh->AddVisualShapeFEA(mvisualizeshellC);
 
-    // Create the Irrlicht visualization system
-    auto vis = chrono_types::make_shared<ChVisualSystemIrrlicht>();
-    vis->SetWindowSize(800, 600);
-    vis->SetWindowTitle("Shells FEA");
-    vis->Initialize();
-    vis->AddLogo();
-    vis->AddSkyBox();
-    vis->AddTypicalLights();
-    vis->AddCamera(ChVector3d(0.0, 6.0, -15.0));
-    vis->AttachSystem(&sys);
+    // Create the run-time visualization system
+    auto vis = CreateVisualizationSystem(vis_type, CameraVerticalDir::Y, sys, "Reissner Shells FEA",
+                                         ChVector3d(0.0, 6.0, -15.0));
 
     // Change solver to PardisoMKL
     auto mkl_solver = chrono_types::make_shared<ChSolverPardisoMKL>();
@@ -452,14 +442,14 @@ int main(int argc, char* argv[]) {
     // sys.SetTimestepperType(ChTimestepper::Type::EULER_IMPLICIT_LINEARIZED);
     // sys.SetTimestepperType(ChTimestepper::Type::HHT);
 
-    if (auto mint = std::dynamic_pointer_cast<ChImplicitIterativeTimestepper>(sys.GetTimestepper())) {
+    if (auto mint = std::dynamic_pointer_cast<ChTimestepperImplicit>(sys.GetTimestepper())) {
         mint->SetMaxIters(5);
         mint->SetAbsTolerances(1e-12, 1e-12);
     }
 
     double timestep = 0.1;
     sys.Setup();
-    sys.Update();
+    sys.Update(false);
 
     ChFunctionInterp rec_X;
     ChFunctionInterp rec_Y;
@@ -469,9 +459,6 @@ int main(int argc, char* argv[]) {
     while (vis->Run()) {
         vis->BeginScene();
         vis->Render();
-
-        // .. draw also a grid
-        tools::drawGrid(vis.get(), 1, 1);
 
         // ...update load at end nodes, as simple lumped nodal forces
 
@@ -492,9 +479,6 @@ int main(int argc, char* argv[]) {
         }
 
         vis->EndScene();
-
-        if (load_scale > 1)
-            vis->GetDevice()->closeDevice();
     }
 
     // Outputs results in a GNUPLOT plot:

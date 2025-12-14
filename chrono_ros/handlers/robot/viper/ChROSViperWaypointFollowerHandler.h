@@ -22,10 +22,10 @@
 
 #include "chrono_ros/ChROSHandler.h"
 #include "chrono_models/robot/viper/Viper.h"
-#include "rclcpp/subscription.hpp"
-#include "geometry_msgs/msg/vector3.hpp"
+#include "chrono_ros/handlers/robot/viper/ChROSViperWaypointFollowerHandler_ipc.h"
 
 #include <mutex>
+#include <vector>
 
 namespace chrono {
 namespace ros {
@@ -33,36 +33,43 @@ namespace ros {
 /// @addtogroup ros_robot_handlers
 /// @{
 
-/// This handler is responsible for interfacing a ViperWaypointFollower driver to ROS.
-class ChROSViperWaypointFollowerHandler : public ChROSHandler {
+/// Bidirectional subscriber that feeds waypoint targets from ROS into the
+/// Chrono ViperWaypointFollower driver. Uses IPC to separate ROS symbols.
+class CH_ROS_API ChROSViperWaypointFollowerHandler : public ChROSHandler {
   public:
     /// Constructor. Takes a ViperWaypointFollower driver
     ChROSViperWaypointFollowerHandler(double update_rate,
-                                    std::shared_ptr<chrono::viper::ViperWaypointFollower> driver,
-                                    const std::string& topic_name);
+                                      std::shared_ptr<chrono::viper::ViperWaypointFollower> driver,
+                                      const std::string& topic_name);
 
-    /// Initializes the handler.
+    /// Initializes the handler (validates topic; no ROS objects created here).
     virtual bool Initialize(std::shared_ptr<ChROSInterface> interface) override;
 
+    /// Message type for IPC routing.
+    virtual ipc::MessageType GetMessageType() const override { return ipc::MessageType::VIPER_WAYPOINT_FOLLOWER; }
+
+    /// This handler receives incoming messages from ROS.
+    virtual bool SupportsIncomingMessages() const override { return true; }
+
+    /// Handle IPC messages carrying waypoint targets.
+    virtual void HandleIncomingMessage(const ipc::Message& msg) override;
+
   protected:
-    /// Updates the driver with stored inputs data from Callback
-    virtual void Tick(double time) override;
+    /// Send topic name once so subprocess can create the ROS subscriber.
+    virtual std::vector<uint8_t> GetSerializedData(double time) override;
 
   private:
-    /// NOTE: This will only update the local m_inputs variable. The driver will receive
-    /// the new commands in the Tick() function.
-    void Callback(const geometry_msgs::msg::Vector3& msg);
+    /// Apply latest target to driver.
+    void ApplyTarget(const ipc::ViperWaypointTarget& target);
 
   private:
     std::shared_ptr<chrono::viper::ViperWaypointFollower> m_driver;  ///< handle to the driver
 
-    const std::string m_topic_name;                         ///< name of the topic to publish to
-    double m_target_x;                               ///< Latest received first speed command
-    double m_target_y; 
-    double m_target_z;                              ///< Latest received second speed command
-    rclcpp::Subscription<geometry_msgs::msg::Vector3>::SharedPtr m_subscription; ///< ROS 2 subscription
+    const std::string m_topic_name;          ///< name of the topic to subscribe to
+    ipc::ViperWaypointTarget m_target;       ///< latest received target
+    bool m_subscriber_setup_sent;            ///< tracks if setup message was sent
 
-    std::mutex m_mutex;
+    std::mutex m_mutex;  ///< protects access to target
 };
 
 /// @} ros_robot_handlers

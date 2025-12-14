@@ -42,7 +42,7 @@
     #define fmin fmin
 #endif
 
-#if defined(WIN32) || defined(WIN64)
+#if defined(_WIN32) || defined(_WIN64)
     #ifndef WIN32_LEAN_AND_MEAN
         #define WIN32_LEAN_AND_MEAN
     #endif
@@ -54,7 +54,7 @@
     @brief Module for multicore parallel simulation
 
     This module implements multicore parallel computing algorithms that can be
-    used as a faster alternative to the default simulation algorithms in Chrono::Engine.
+    used as a faster alternative to the default simulation algorithms in Chrono.
     This is achieved using OpenMP, CUDA, Thrust, etc.
 
     For additional information, see:

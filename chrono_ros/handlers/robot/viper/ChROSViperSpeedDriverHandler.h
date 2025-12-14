@@ -22,10 +22,10 @@
 
 #include "chrono_ros/ChROSHandler.h"
 #include "chrono_models/robot/viper/Viper.h"
-#include "rclcpp/subscription.hpp"
-#include "std_msgs/msg/float32.hpp"
+#include "chrono_ros/handlers/robot/viper/ChROSViperSpeedDriverHandler_ipc.h"
 
 #include <mutex>
+#include <vector>
 
 namespace chrono {
 namespace ros {
@@ -33,32 +33,42 @@ namespace ros {
 /// @addtogroup ros_robot_handlers
 /// @{
 
-/// This handler interfaces a ViperSpeedDriver to ROS 2.
-/// It subscribes to a Float32 message representing the desired wheel speed.
-class ChROSViperSpeedDriverHandler : public ChROSHandler {
+/// Bidirectional subscriber handler that applies wheel speed commands coming
+/// from ROS (Float32 topic) to a Chrono ViperSpeedDriver. Uses IPC to avoid ROS
+/// symbols in the main process.
+class CH_ROS_API ChROSViperSpeedDriverHandler : public ChROSHandler {
   public:
     /// Constructor. Takes a ViperSpeedDriver instance.
     ChROSViperSpeedDriverHandler(double update_rate,
                                  std::shared_ptr<chrono::viper::ViperSpeedDriver> driver,
                                  const std::string& topic_name);
 
-    /// Initializes the handler.
+    /// Initializes the handler (validates topic name; no ROS objects created in main process).
     virtual bool Initialize(std::shared_ptr<ChROSInterface> interface) override;
 
+    /// Message type for IPC routing.
+    virtual ipc::MessageType GetMessageType() const override { return ipc::MessageType::VIPER_SPEED_DRIVER; }
+
+    /// This handler receives incoming messages from the ROS subprocess.
+    virtual bool SupportsIncomingMessages() const override { return true; }
+
+    /// Handle IPC messages carrying speed commands from ROS.
+    virtual void HandleIncomingMessage(const ipc::Message& msg) override;
+
   protected:
-    /// Updates the driver with stored speed data.
-    virtual void Tick(double time) override;
+    /// Send topic name once so the subprocess can create the ROS subscriber.
+    virtual std::vector<uint8_t> GetSerializedData(double time) override;
 
   private:
-    /// Callback function for speed command subscription.
-    void Callback(const std_msgs::msg::Float32& msg);
+    /// Apply the latest command to the driver.
+    void ApplySpeed(double speed);
 
   private:
     std::shared_ptr<chrono::viper::ViperSpeedDriver> m_driver;  ///< Handle to the driver
 
-    const std::string m_topic_name;                 ///< Topic name for speed commands
-    double m_speed_command;                         ///< Latest received speed command
-    rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr m_subscription; ///< ROS 2 subscription for speed input
+    const std::string m_topic_name;  ///< Topic name for speed commands
+    ipc::ViperSpeedCommand m_command;  ///< Latest received speed command
+    bool m_subscriber_setup_sent;      ///< Tracks if setup message sent to subprocess
 
     std::mutex m_mutex;
 };

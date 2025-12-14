@@ -25,8 +25,8 @@
 
 #include "chrono/physics/ChSystemNSC.h"
 #include "chrono/physics/ChBodyEasy.h"
-#include "chrono/utils/ChUtilsInputOutput.h"
-#include "chrono/physics/ChInertiaUtils.h"
+#include "chrono/input_output/ChUtilsInputOutput.h"
+#include "chrono/physics/ChMassProperties.h"
 
 #include "chrono_vehicle/terrain/SCMTerrain.h"
 
@@ -71,7 +71,8 @@ using namespace chrono::ros;
 
 using namespace irr;
 
-ChVisualSystem::Type vis_type = ChVisualSystem::Type::VSG;
+// Disable visualization for headless execution.
+ChVisualSystem::Type vis_type = ChVisualSystem::Type::NONE;
 double mesh_resolution = 0.02;
 bool enable_bulldozing = false; // Enable/disable bulldozing effects
 bool enable_moving_patch = true; // Enable/disable moving patch feature
@@ -107,9 +108,9 @@ void InitializeApolloTerrain(vehicle::SCMTerrain& terrain, double mesh_resolutio
     const std::string bmp_file = GetChronoDataFile("robot/viper/terrain/nasa_apollo_site.bmp");
 
     // Uniform scaling: enforce 50 m terrain length (BMP x-axis span).
-    constexpr double kDesiredTerrainLength = 50.0;
-    constexpr double kHeightMin = -2.5;
-    constexpr double kHeightMax = 2.5;
+    constexpr double kDesiredTerrainLength = 200.0;
+    constexpr double kHeightMin = -10.0;
+    constexpr double kHeightMax = 10.0;
 
     std::ifstream bmp_stream(bmp_file, std::ios::binary);
     if (!bmp_stream.is_open()) {
@@ -189,13 +190,16 @@ int main(int argc, char* argv[]) {
     sys.SetNumThreads(num_threads_chrono, num_threads_collision, num_threads_eigen);
 
     sys.SetCollisionSystemType(ChCollisionSystem::Type::BULLET);
-    sys.SetGravitationalAcceleration(ChVector3d(0, 0, -9.81));
+    sys.SetGravitationalAcceleration(ChVector3d(0, 0, -1.62));
 
-    // Create ROS manager
-    auto ros_manager = chrono_types::make_shared<ChROSManager>();
-    // Create a publisher for the simulation clock
-    auto clock_handler = chrono_types::make_shared<ChROSClockHandler>();
-    ros_manager->RegisterHandler(clock_handler);    
+    // Toggle ROS to isolate performance; when disabled, skip all ROS handlers.
+    bool enable_ros = false;
+    std::shared_ptr<ChROSManager> ros_manager;
+    if (enable_ros) {
+        ros_manager = chrono_types::make_shared<ChROSManager>();
+        auto clock_handler = chrono_types::make_shared<ChROSClockHandler>();
+        ros_manager->RegisterHandler(clock_handler);
+    }
 
     double initial_target_x = -5.0;
     double initial_target_y =  0.0;
@@ -205,12 +209,26 @@ int main(int argc, char* argv[]) {
     Viper viper(&sys, wheel_type);
     // Viper viper(&sys, ViperWheelType::RealWheel);
     viper.SetDriver(driver);
-    if (use_custom_mat){
+    if (use_custom_mat) {
         viper.SetWheelContactMaterial(CustomWheelMaterial(ChContactMethod::NSC));
     }
-    viper.Initialize(ChFrame<>(ChVector3d(-5, 0, -0.2), QUNIT));
 
-    // Get wheels and bodies to set up SCM patches
+    //
+    // THE DEFORMABLE TERRAIN
+    //
+    vehicle::SCMTerrain terrain(&sys);
+    // Position the SCM reference frame so the nominal surface origin is at (17, 0, -3).
+    terrain.SetReferenceFrame(ChCoordsys<>(ChVector3d(17, 0, -3)));
+    InitializeApolloTerrain(terrain, mesh_resolution);
+
+    // Spawn the rover relative to the actual terrain height to avoid large drop impacts.
+    const ChVector3d start_xy(-5.0, 0.0, 0.0);
+    const double start_clearance = 0.25;  // small lift above surface
+    const double terrain_height = terrain.GetHeight(start_xy);
+    const ChFrame<> start_pose(ChVector3d(start_xy.x(), start_xy.y(), terrain_height + start_clearance), QUNIT);
+    viper.Initialize(start_pose);
+
+    // Get wheels and bodies to set up SCM patches (after Viper constructed)
     auto Wheel_1 = viper.GetWheel(ViperWheelID::V_LF)->GetBody();
     auto Wheel_2 = viper.GetWheel(ViperWheelID::V_RF)->GetBody();
     auto Wheel_3 = viper.GetWheel(ViperWheelID::V_LB)->GetBody();
@@ -218,26 +236,27 @@ int main(int argc, char* argv[]) {
     auto Body_1 = viper.GetChassis()->GetBody();
 
 
-    // Create a subscriber to receive ROS motor commands
-    auto driver_inputs_rate = 25;
+    if (enable_ros) {
+        // Create a subscriber to receive ROS motor commands
+        auto driver_inputs_rate = 25;
+        auto driver_inputs_topic_name = "~/input/driver_waypoint_update";
+        auto driver_inputs_handler =
+            chrono_types::make_shared<ChROSViperWaypointFollowerHandler>(driver_inputs_rate, driver, driver_inputs_topic_name);
+        ros_manager->RegisterHandler(driver_inputs_handler);
 
-    auto driver_inputs_topic_name = "~/input/driver_waypoint_update";
-    auto driver_inputs_handler = chrono_types::make_shared<ChROSViperWaypointFollowerHandler>(driver_inputs_rate, driver, driver_inputs_topic_name);
-    
-    ros_manager->RegisterHandler(driver_inputs_handler);
+        auto path_topic_name = "~/output/rover/waypoint_path";
+        auto path_publish_rate = 10;
+        auto waypoint_path_handler =
+            chrono_types::make_shared<ChROSViperWaypointPathHandler>(path_publish_rate, driver, path_topic_name);
+        ros_manager->RegisterHandler(waypoint_path_handler);
 
-    auto path_topic_name = "~/output/rover/waypoint_path";
-    auto path_publish_rate = 10;
-    auto waypoint_path_handler =
-        chrono_types::make_shared<ChROSViperWaypointPathHandler>(path_publish_rate, driver, path_topic_name);
-    ros_manager->RegisterHandler(waypoint_path_handler);
-
-    // Create a publisher for the rover state
-    auto rover_state_rate = 25;
-    auto rover_state_topic_name = "~/output/rover/state";
-    auto rover_state_handler = chrono_types::make_shared<ChROSBodyHandler>(
-        rover_state_rate, viper.GetChassis()->GetBody(), rover_state_topic_name);
-    ros_manager->RegisterHandler(rover_state_handler);
+        // Create a publisher for the rover state
+        auto rover_state_rate = 25;
+        auto rover_state_topic_name = "~/output/rover/state";
+        auto rover_state_handler = chrono_types::make_shared<ChROSBodyHandler>(
+            rover_state_rate, viper.GetChassis()->GetBody(), rover_state_topic_name);
+        ros_manager->RegisterHandler(rover_state_handler);
+    }
 
     std::cout << "Initial velocity before sim loop: " << viper.GetChassis()->GetBody()->GetPosDt() << std::endl;
 
@@ -255,7 +274,7 @@ int main(int argc, char* argv[]) {
     rock_vis_mat->SetUseHapke(true);
     rock_vis_mat->SetHapkeParameters(0.32357f, 0.23955f, 0.30452f, 1.80238f, 0.07145f, 0.3f,23.4f*(CH_PI/180));
 
-    // Rocks' Predefined Positions
+    // Rocks' Predefined Positions (XY fixed; Z sampled from terrain)
     std::vector<ChVector3d> rock_positions = {
         { 1.0, -0.5, 0.0}, {-0.5, -0.5, 0.0}, {2.4,  0.4, 0.0}, { 0.6,  1.0, 0.0}, { 5.5, 1.2, 0.0},
         { 1.2,  2.1, 0.0}, {-0.3, -2.1, 0.0}, {0.4,  2.5, 0.0}, { 4.2,  1.4, 0.0}, { 5.0, 2.4, 0.0},
@@ -263,6 +282,7 @@ int main(int argc, char* argv[]) {
         {-2.0, -1.1, 0.0}, {-5.0, -2.1, 0.0}, {1.5, -0.8, 0.0}, {-2.6,  1.6, 0.0}, {-2.0, 1.8, 0.0}
     };
 
+    // Place rocks at their predefined positions (no terrain height adjustment)
     for (int i = 0; i < 20; i++) {
         std::string rock_obj_path = GetChronoDataFile("robot/curiosity/rocks/rock" + std::to_string(i % 3 + 1) + ".obj");
 
@@ -284,17 +304,19 @@ int main(int argc, char* argv[]) {
         // set the abs orientation, position and velocity
         auto rock_body = chrono_types::make_shared<ChBodyAuxRef>();
         ChQuaternion<> rock_rot = QuatFromAngleX(CH_PI / 2);
-        // ChVector3d rock_pos;
-        // rock_body->SetMass(50.0);
 
         rock_body->SetFrameCOMToRef(ChFrame<>(mcog, principal_inertia_rot));
 
         rock_body->SetMass(mmass * mdensity);
         rock_body->SetInertiaXX(mdensity * principal_I);
-        rock_body->SetFrameRefToAbs(ChFrame<>(ChVector3d(rock_positions[i]), ChQuaternion<>(rock_rot)));
+
+        // Drop rocks from a higher initial lift so they fall visibly once (computed once at startup).
+        const double rock_lift = 0.25;  // 25 cm above local terrain
+        const double rock_surface_z = terrain.GetHeight(rock_positions[i]) + rock_lift;
+        ChVector3d rock_pos(rock_positions[i].x(), rock_positions[i].y(), rock_surface_z);
+        rock_body->SetFrameRefToAbs(ChFrame<>(rock_pos, ChQuaternion<>(rock_rot)));
         sys.Add(rock_body);
 
-        // rock_body->SetPos(rock_positions[i]);
         rock_body->SetFixed(false);
 
         auto rock_shape = chrono_types::make_shared<ChCollisionShapeTriangleMesh>(rockSurfaceMaterial, rock_mesh, false, false, 0.005);
@@ -317,20 +339,6 @@ int main(int argc, char* argv[]) {
         // sys.Add(rock_body);
         rocks.push_back(rock_body);
     }
-
-    //
-    // THE DEFORMABLE TERRAIN
-    //
-
-    vehicle::SCMTerrain terrain(&sys);
-    // Displace/rotate the terrain reference plane.
-    // Note that SCMTerrain uses a default ISO reference frame (Z up). Since the mechanism is modeled here in
-    // a Y-up global frame, we rotate the terrain plane by -90 degrees about the X axis.
-    // Note: Irrlicht uses a Y-up frame
-    terrain.SetPlane(ChCoordsys<>(ChVector3d(17, 0, -3)));
-
-    InitializeApolloTerrain(terrain, mesh_resolution);
-
     auto lunar_material = chrono_types::make_shared<ChVisualMaterial>();
     lunar_material->SetAmbientColor({0.0, 0.0, 0.0}); //0.65f,0.65f,0.65f
     lunar_material->SetDiffuseColor({0.7, 0.7, 0.7});
@@ -380,16 +388,16 @@ int main(int argc, char* argv[]) {
             6);  // number of concentric vertex selections subject to erosion
     }
 
-    // We need to add a moving patch under every wheel
-    // Or we can define a large moving patch at the pos of the rover body
+    // Add active domains around wheels/rocks (API supported in this Chrono version)
     if (enable_moving_patch) {
-        terrain.AddMovingPatch(Wheel_1, ChVector3d(0, 0, 0), ChVector3d(0.5, 2 * wheel_range, 2 * wheel_range));
-        terrain.AddMovingPatch(Wheel_2, ChVector3d(0, 0, 0), ChVector3d(0.5, 2 * wheel_range, 2 * wheel_range));
-        terrain.AddMovingPatch(Wheel_3, ChVector3d(0, 0, 0), ChVector3d(0.5, 2 * wheel_range, 2 * wheel_range));
-        terrain.AddMovingPatch(Wheel_4, ChVector3d(0, 0, 0), ChVector3d(0.5, 2 * wheel_range, 2 * wheel_range));
+        double wheel_range = 0.5;
+        terrain.AddActiveDomain(Wheel_1, ChVector3d(0, 0, 0), ChVector3d(0.5, 2 * wheel_range, 2 * wheel_range));
+        terrain.AddActiveDomain(Wheel_2, ChVector3d(0, 0, 0), ChVector3d(0.5, 2 * wheel_range, 2 * wheel_range));
+        terrain.AddActiveDomain(Wheel_3, ChVector3d(0, 0, 0), ChVector3d(0.5, 2 * wheel_range, 2 * wheel_range));
+        terrain.AddActiveDomain(Wheel_4, ChVector3d(0, 0, 0), ChVector3d(0.5, 2 * wheel_range, 2 * wheel_range));
 
         for (int i = 0; i < 20; i++) {
-            terrain.AddMovingPatch(rocks[i], ChVector3d(0, 0, 0), ChVector3d(0.5, 0.5, 0.5));
+            terrain.AddActiveDomain(rocks[i], ChVector3d(0, 0, 0), ChVector3d(0.5, 0.5, 0.5));
         }
     }
 
@@ -407,40 +415,42 @@ int main(int argc, char* argv[]) {
 #endif
 
     std::shared_ptr<ChVisualSystem> vis;
-    switch (vis_type) {
-        case ChVisualSystem::Type::IRRLICHT: {
+    if (vis_type != ChVisualSystem::Type::NONE) {
+        switch (vis_type) {
+            case ChVisualSystem::Type::IRRLICHT: {
 #ifdef CHRONO_IRRLICHT
-            auto vis_irr = chrono_types::make_shared<ChVisualSystemIrrlicht>();
-            vis_irr->AttachSystem(&sys);
-            vis_irr->SetCameraVertical(CameraVerticalDir::Z);
-            vis_irr->SetWindowSize(800, 600);
-            vis_irr->SetWindowTitle("Viper Rover on SCM");
-            vis_irr->Initialize();
-            vis_irr->AddLogo();
-            vis_irr->AddSkyBox();
-            vis_irr->AddCamera(ChVector3d(1.0, 2.0, 1.4), ChVector3d(0, 0, wheel_range));
-            vis_irr->AddTypicalLights();
-            vis_irr->AddLightWithShadow(ChVector3d(-5.0, -0.5, 8.0), ChVector3d(-1, 0, 0), 100, 1, 35, 85, 512,
-                                        ChColor(0.8f, 0.8f, 0.8f));
-            vis_irr->EnableShadows();
+                auto vis_irr = chrono_types::make_shared<ChVisualSystemIrrlicht>();
+                vis_irr->AttachSystem(&sys);
+                vis_irr->SetCameraVertical(CameraVerticalDir::Z);
+                vis_irr->SetWindowSize(800, 600);
+                vis_irr->SetWindowTitle("Viper Rover on SCM");
+                vis_irr->Initialize();
+                vis_irr->AddLogo();
+                vis_irr->AddSkyBox();
+                vis_irr->AddCamera(ChVector3d(1.0, 2.0, 1.4), ChVector3d(0, 0, wheel_range));
+                vis_irr->AddTypicalLights();
+                vis_irr->AddLightWithShadow(ChVector3d(-5.0, -0.5, 8.0), ChVector3d(-1, 0, 0), 100, 1, 35, 85, 512,
+                                            ChColor(0.8f, 0.8f, 0.8f));
+                vis_irr->EnableShadows();
 
-            vis = vis_irr;
+                vis = vis_irr;
 #endif
-            break;
-        }
-        default:
-        case ChVisualSystem::Type::VSG: {
+                break;
+            }
+            default:
+            case ChVisualSystem::Type::VSG: {
 #ifdef CHRONO_VSG
-            auto vis_vsg = chrono_types::make_shared<ChVisualSystemVSG>();
-            vis_vsg->AttachSystem(&sys);
-            vis_vsg->SetWindowSize(800, 600);
-            vis_vsg->SetWindowTitle("Viper Rover on SCM");
-            vis_vsg->AddCamera(ChVector3d(1.0, 2.0, 1.4), ChVector3d(0, 0, wheel_range));
-            vis_vsg->Initialize();
+                auto vis_vsg = chrono_types::make_shared<ChVisualSystemVSG>();
+                vis_vsg->AttachSystem(&sys);
+                vis_vsg->SetWindowSize(800, 600);
+                vis_vsg->SetWindowTitle("Viper Rover on SCM");
+                vis_vsg->AddCamera(ChVector3d(1.0, 2.0, 1.4), ChVector3d(0, 0, wheel_range));
+                vis_vsg->Initialize();
 
-            vis = vis_vsg;
+                vis = vis_vsg;
 #endif
-            break;
+                break;
+            }
         }
     }
 
@@ -468,6 +478,13 @@ int main(int argc, char* argv[]) {
     int camera_image_height = 480;
     float camera_fov = (float)CH_PI / 3;
 
+    // Wide observer camera (global view)
+    int observer_update_rate = 25;
+    int observer_image_width = 1280;
+    int observer_image_height = 720;
+    float observer_fov = (float)CH_PI / 2;  // wide FOV
+    auto observer_pose = ChFrame<>(ChVector3d(-6.0, 0.0, 3.0), QuatFromAngleZ(0));
+
     auto stereo_L = chrono_types::make_shared<ChCameraSensor>(viper.GetChassis()->GetBody(), // body lidar is attached to
                                                          camera_update_rate,                            // scanning rate in Hz
                                                          offset_pose_stereo_L,                   // offset pose
@@ -477,16 +494,17 @@ int main(int argc, char* argv[]) {
     stereo_L->SetName("Camera Sensor L");
     stereo_L->SetLag(0.f);
     stereo_L->SetCollectionWindow(0.02f);                                                        
-    // Publish Stereo Left Image
-    stereo_L->PushFilter(chrono_types::make_shared<ChFilterRGBA8Access>());
-    auto stereo_L_handler = chrono_types::make_shared<ChROSCameraHandler>(
-        camera_update_rate,  // Publish rate
-        stereo_L,                   // Camera sensor
-        "~/stereo/left"             // ROS topic name
-    );
-    ros_manager->RegisterHandler(stereo_L_handler);
-
+    // Visualization only unless ROS is enabled
     stereo_L->PushFilter(chrono_types::make_shared<ChFilterVisualize>(camera_image_width, camera_image_height, "Stereo View L"));
+    if (enable_ros) {
+        stereo_L->PushFilter(chrono_types::make_shared<ChFilterRGBA8Access>());
+        auto stereo_L_handler = chrono_types::make_shared<ChROSCameraHandler>(
+            camera_update_rate,  // Publish rate
+            stereo_L,                   // Camera sensor
+            "~/stereo/left"             // ROS topic name
+        );
+        ros_manager->RegisterHandler(stereo_L_handler);
+    }
     manager->AddSensor(stereo_L);
     
     
@@ -499,36 +517,64 @@ int main(int argc, char* argv[]) {
     stereo_R->SetName("Camera Sensor");
     stereo_R->SetLag(0.f);
     stereo_R->SetCollectionWindow(0.02f);                                                        
-    // Publish Right Stereo Image
-    stereo_R->PushFilter(chrono_types::make_shared<ChFilterRGBA8Access>());
-    auto stereo_R_handler = chrono_types::make_shared<ChROSCameraHandler>(
-        camera_update_rate,
-        stereo_R,
-        "~/stereo/right"
-    );
-    ros_manager->RegisterHandler(stereo_R_handler);
-
+    // Visualization only unless ROS is enabled
     stereo_R->PushFilter(chrono_types::make_shared<ChFilterVisualize>(camera_image_width, camera_image_height, "Stereo View R"));
+    if (enable_ros) {
+        stereo_R->PushFilter(chrono_types::make_shared<ChFilterRGBA8Access>());
+        auto stereo_R_handler = chrono_types::make_shared<ChROSCameraHandler>(
+            camera_update_rate,
+            stereo_R,
+            "~/stereo/right"
+        );
+        ros_manager->RegisterHandler(stereo_R_handler);
+    }
     manager->AddSensor(stereo_R);
+
+    // Add observer camera sensor for a full-scene view
+    auto observer_cam = chrono_types::make_shared<ChCameraSensor>(
+        viper.GetChassis()->GetBody(),  // mount to chassis for relative tracking
+        observer_update_rate,
+        observer_pose,
+        observer_image_width,
+        observer_image_height,
+        observer_fov);
+    observer_cam->SetName("Observer Camera");
+    observer_cam->SetLag(0.f);
+    observer_cam->SetCollectionWindow(0.02f);
+    observer_cam->PushFilter(chrono_types::make_shared<ChFilterVisualize>(observer_image_width, observer_image_height, "Observer View"));
+    if (enable_ros) {
+        observer_cam->PushFilter(chrono_types::make_shared<ChFilterRGBA8Access>());
+        auto observer_handler = chrono_types::make_shared<ChROSCameraHandler>(
+            observer_update_rate,
+            observer_cam,
+            "~/stereo/observer");
+        ros_manager->RegisterHandler(observer_handler);
+    }
+    manager->AddSensor(observer_cam);
 
 
     // Finally, initialize the ros manager
-    ros_manager->Initialize();
+    if (enable_ros) {
+        ros_manager->Initialize();
+    }
 
-    // Run the simulation with continuous motion. The stereo cameras share the same
-    // update rate and sensor manager, so their images are time-synchronized without
-    // needing to stop the rover explicitly.
-    while (vis->Run()) {
+    // Run the simulation headless; keep a finite horizon to avoid infinite loops.
+    const double sim_end_time = 60.0;  // seconds
+    while (sys.GetChTime() < sim_end_time) {
+        if (vis) {
 #if defined(CHRONO_IRRLICHT) || defined(CHRONO_VSG)
-        vis->BeginScene();
-        vis->SetCameraTarget(Body_1->GetPos());
-        vis->Render();
-        vis->EndScene();
+            vis->BeginScene();
+            vis->SetCameraTarget(Body_1->GetPos());
+            vis->Render();
+            vis->EndScene();
 #endif
+        }
 
         // Update ROS interfaces (clock, rover state, camera topics, etc.)
-        if (!ros_manager->Update(sys.GetChTime(), time_step)) {
-            break;
+        if (enable_ros) {
+            if (!ros_manager->Update(sys.GetChTime(), time_step)) {
+                break;
+            }
         }
 
         // Advance all sensors; each camera decides internally when to render

@@ -60,7 +60,7 @@ void create_items(ChSystem& sys) {
         for (int bi = 0; bi < num_bodies; bi++) {
             double sphrad = sphrad_base;
             if (do_oddmass && bi == (num_bodies - 1))
-                sphrad = sphrad * pow(oddfactor, 1. / 3.);
+                sphrad = sphrad * std::cbrt(oddfactor);
 
             std::shared_ptr<ChBody> rigidBody;
 
@@ -165,7 +165,7 @@ void align_spheres() {
 int main(int argc, char* argv[]) {
     std::cout << "Copyright (c) 2017 projectchrono.org\nChrono version: " << CHRONO_VERSION << std::endl;
 
-    // Create a ChronoENGINE physical system
+    // Create a Chrono physical system
     ChSystemNSC sys;
     sys.SetCollisionSystemType(ChCollisionSystem::Type::BULLET);
 
@@ -193,12 +193,13 @@ int main(int argc, char* argv[]) {
     // also affects reaction forces, thus it must be deactivated (or used as a very large value)
     sys.SetMaxPenetrationRecoverySpeed(1e6);
 
+    vis->ShowConvergencePlot(true);
+
+
     // Simulation loop
     while (vis->Run()) {
         vis->BeginScene();
         vis->Render();
-
-        tools::drawHUDviolation(vis.get());
 
         vis->EndScene();
 
